@@ -91,8 +91,7 @@ export interface UptoStellarEscrowFacilitatorOptions {
  *
  * This is the project's primary, default `upto`/`managed upto`
  * implementation as of the escrow-and-refund comparison (see
- * `docs/architecture.md`, "Design alternative considered", and
- * `docs/use-cases-and-integration-plan.md`): it needs no SEP-41 `approve`
+ * `docs/architecture.md`, "Design alternative considered"): it needs no SEP-41 `approve`
  * prerequisite and the escrow contract owns zero persistent contract-level
  * storage, keeping the default design stateless
  * literally. The allowance-based design (`UptoStellarScheme`, Design A,
