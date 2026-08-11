@@ -1,0 +1,17 @@
+node_modules/
+dist/
+build/
+target/
+*.log
+*.docx
+.env
+.env.local
+!.env.example
+.DS_Store
+*.tsbuildinfo
+coverage/
+.turbo/
+*.db
+*.db-journal
+.soroban/
+test_snapshots/

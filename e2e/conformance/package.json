@@ -1,0 +1,30 @@
+{
+  "name": "@x402-stellar/e2e-conformance",
+  "version": "0.1.0",
+  "private": true,
+  "description": "End-to-end conformance scripts against live Stellar deployments (testnet settlement; read-only pubnet connectivity)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "upto:testnet": "tsx src/upto-testnet.ts",
+    "exact:testnet": "tsx src/exact-testnet.ts",
+    "cancel-idempotency:testnet": "tsx src/cancel-and-idempotency-testnet.ts",
+    "zero-amount-nonce:testnet": "tsx src/zero-amount-nonce-testnet.ts",
+    "channel-account:testnet": "tsx src/channel-account-testnet.ts",
+    "escrow-design-b:testnet": "tsx src/escrow-design-b-testnet.ts",
+    "escrow-facilitator:testnet": "tsx src/escrow-facilitator-testnet.ts",
+    "resource-benchmark:testnet": "tsx src/resource-benchmark-testnet.ts",
+    "pubnet:rpc-connectivity": "tsx src/pubnet-rpc-connectivity.ts"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "^16.0.1",
+    "@x402/core": "^2.21.0",
+    "@x402/stellar": "^2.21.0",
+    "@x402-stellar/upto": "workspace:*",
+    "@x402-stellar/sdk": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.21.0",
+    "typescript": "^5.7.3"
+  }
+}

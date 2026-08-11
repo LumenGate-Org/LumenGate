@@ -1,0 +1,26 @@
+{
+  "name": "@x402-stellar/example-seller-http",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Example x402 resource server on Stellar: a fixed-price (exact) endpoint and a metered (managed upto) endpoint, both Bazaar-discoverable",
+  "license": "Apache-2.0",
+  "type": "module",
+  "scripts": {
+    "dev": "tsx --env-file=.env src/index.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@x402/core": "^2.21.0",
+    "@x402/express": "^2.21.0",
+    "@x402/stellar": "^2.21.0",
+    "@x402-stellar/sdk": "workspace:*",
+    "@x402-stellar/upto": "workspace:*",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "typescript": "^5.7.3",
+    "tsx": "^4.21.0"
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "name": "@x402-stellar/sdk",
+  "version": "0.1.0",
+  "description": "Thin buyer/agent and seller helpers for the x402 Stellar facilitator (built on @x402/core, @x402/stellar, @x402/fetch, @x402-stellar/upto)",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "^16.0.1",
+    "@x402/core": "^2.21.0",
+    "@x402/extensions": "^2.21.0",
+    "@x402/fetch": "^2.21.0",
+    "@x402/stellar": "^2.21.0",
+    "@x402-stellar/upto": "workspace:*"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5"
+  }
+}

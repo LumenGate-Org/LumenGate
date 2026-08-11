@@ -1,0 +1,37 @@
+{
+  "name": "@x402-stellar/facilitator",
+  "version": "0.1.0",
+  "description": "x402 Facilitator for Stellar: exact + upto (standard/managed) settlement, Bazaar discovery, off-chain billing",
+  "license": "Apache-2.0",
+  "type": "module",
+  "private": true,
+  "main": "./dist/server.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "dev": "tsx --env-file=.env src/server.ts",
+    "indexer": "node dist/indexer.js",
+    "indexer:once": "node dist/indexer.js --once",
+    "indexer:dev": "tsx --env-file=.env src/indexer.ts",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "^16.0.1",
+    "@x402/core": "^2.21.0",
+    "@x402/extensions": "^2.21.0",
+    "@x402/stellar": "^2.21.0",
+    "@x402-stellar/upto": "workspace:*",
+    "@x402-stellar/discovery": "workspace:*",
+    "better-sqlite3": "^11.8.1",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.12",
+    "@types/express": "^5.0.0",
+    "typescript": "^5.7.3",
+    "tsx": "^4.21.0",
+    "vitest": "^3.0.5"
+  }
+}

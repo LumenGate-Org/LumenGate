@@ -1,0 +1,95 @@
+[
+  {
+    "query": "weather forecast API",
+    "relevantResourceUrls": [
+      "https://api.example.com/svc/a1b2"
+    ],
+    "note": "Zero literal word overlap with the resource's description ('atmospheric conditions and precipitation outlook') \u2014 a pure semantic-matching case, the exact gap lexical-only search cannot close."
+  },
+  {
+    "query": "generate images from text prompts",
+    "relevantResourceUrls": [
+      "https://api.example.com/svc/k1l2"
+    ],
+    "note": "Partial lexical overlap ('prompt') plus semantic ('generate images' / 'create pictures')."
+  },
+  {
+    "query": "currency conversion rates",
+    "relevantResourceUrls": [
+      "https://api.example.com/svc/g7h8"
+    ],
+    "note": "Mostly lexical \u2014 a baseline sanity check that hybrid search doesn't regress easy cases."
+  },
+  {
+    "query": "how much does a share of stock cost right now",
+    "relevantResourceUrls": [
+      "https://api.example.com/svc/i9j0"
+    ],
+    "note": "Fully paraphrased natural-language query, zero shared vocabulary with 'equity market pricing and trading volume' \u2014 pure semantic-matching case."
+  },
+  {
+    "query": "make my document sound like it's spoken by a real voice",
+    "relevantResourceUrls": [
+      "https://api.example.com/svc/w3x4"
+    ],
+    "note": "Partial lexical overlap ('spoken') plus semantic ('sound' / 'voice' vs. 'natural-sounding... audio')."
+  },
+  {
+    "query": "map data with elevation and satellite photos",
+    "relevantResourceUrls": [
+      "https://api.example.com/svc/q7r8"
+    ],
+    "note": "Mostly lexical ('satellite', 'elevation' both literal)."
+  },
+  {
+    "query": "run a python script in a safe sandboxed environment",
+    "relevantResourceUrls": [
+      "https://api.example.com/svc/u1v2"
+    ],
+    "note": "Zero literal word overlap with the resource's description ('isolated container') — 'sandboxed' vs. 'container' is a pure semantic-matching case."
+  },
+  {
+    "query": "translate a paragraph into french",
+    "relevantResourceUrls": [
+      "https://api.example.com/svc/o5p6"
+    ],
+    "note": "The literal word 'translate' does not appear anywhere in the resource's description or service name ('Render written text from one human language into another', 'Lingua Bridge') \u2014 pure semantic-matching case."
+  },
+  {
+    "query": "turn my 3D models into rendered animation frames",
+    "relevantResourceUrls": [
+      "https://api.example.com/svc/s9t0"
+    ],
+    "note": "Mostly lexical ('3D', 'render' both literal)."
+  },
+  {
+    "query": "embed my documents into vectors for semantic search",
+    "relevantResourceUrls": [
+      "https://api.example.com/svc/e5f6"
+    ],
+    "note": "Mostly lexical ('vectors', 'semantic search' both literal in the description)."
+  },
+  {
+    "query": "write me a poem using an AI language model",
+    "relevantResourceUrls": [
+      "https://api.example.com/svc/c3d4"
+    ],
+    "note": "Partial lexical ('language model') plus semantic ('write' / 'text completions')."
+  },
+  {
+    "query": "resize and re-encode my video file",
+    "relevantResourceUrls": [
+      "https://api.example.com/svc/m3n4"
+    ],
+    "note": "Lexical ('video') plus semantic ('re-encode' / 'convert between formats')."
+  },
+  {
+    "query": "content generation tools",
+    "relevantResourceUrls": [
+      "https://api.example.com/svc/c3d4",
+      "https://api.example.com/svc/k1l2",
+      "https://api.example.com/svc/w3x4"
+    ],
+    "note": "Multi-relevant case (Recall@k matters more here than for the single-relevant queries above): any generative AI resource is a reasonable match. Embeddings is deliberately excluded \u2014 it's an AI resource but not a *generative* one."
+  }
+]

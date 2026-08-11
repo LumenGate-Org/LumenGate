@@ -1,0 +1,242 @@
+[
+  {
+    "resourceUrl": "https://api.example.com/svc/a1b2",
+    "type": "http",
+    "method": "GET",
+    "x402Version": 2,
+    "description": "Daily atmospheric conditions and precipitation outlook by city, updated hourly",
+    "serviceName": "Atmos Daily",
+    "tags": [
+      "meteorology",
+      "climate-data"
+    ],
+    "payTo": "GBHEGW3KWOY2OFH767EDALFGCUTBOEVBDQMCKU4APMDLQNBW5QV3W3KO",
+    "scheme": "exact",
+    "network": "stellar:testnet",
+    "requirements": {
+      "scheme": "exact",
+      "network": "stellar:testnet",
+      "amount": "10000"
+    }
+  },
+  {
+    "resourceUrl": "https://api.example.com/svc/c3d4",
+    "type": "http",
+    "method": "POST",
+    "x402Version": 2,
+    "description": "Generate text completions from a large language model, billed per output token",
+    "serviceName": "TokenForge",
+    "tags": [
+      "ai",
+      "text-generation"
+    ],
+    "payTo": "GBHEGW3KWOY2OFH767EDALFGCUTBOEVBDQMCKU4APMDLQNBW5QV3W3KO",
+    "scheme": "upto",
+    "network": "stellar:testnet",
+    "requirements": {
+      "scheme": "upto",
+      "network": "stellar:testnet",
+      "amount": "1000000"
+    }
+  },
+  {
+    "resourceUrl": "https://api.example.com/svc/e5f6",
+    "type": "http",
+    "method": "POST",
+    "x402Version": 2,
+    "description": "Convert text into dense vector representations for semantic similarity search",
+    "serviceName": "VectorMint",
+    "tags": [
+      "ai",
+      "embeddings"
+    ],
+    "payTo": "GBHEGW3KWOY2OFH767EDALFGCUTBOEVBDQMCKU4APMDLQNBW5QV3W3KO",
+    "scheme": "exact",
+    "network": "stellar:testnet",
+    "requirements": {
+      "scheme": "exact",
+      "network": "stellar:testnet",
+      "amount": "5000"
+    }
+  },
+  {
+    "resourceUrl": "https://api.example.com/svc/g7h8",
+    "type": "http",
+    "method": "GET",
+    "x402Version": 2,
+    "description": "Live currency exchange rates and historical conversion data across 150 currencies",
+    "serviceName": "RateStream",
+    "tags": [
+      "finance",
+      "currency"
+    ],
+    "payTo": "GBHEGW3KWOY2OFH767EDALFGCUTBOEVBDQMCKU4APMDLQNBW5QV3W3KO",
+    "scheme": "exact",
+    "network": "stellar:testnet",
+    "requirements": {
+      "scheme": "exact",
+      "network": "stellar:testnet",
+      "amount": "8000"
+    }
+  },
+  {
+    "resourceUrl": "https://api.example.com/svc/i9j0",
+    "type": "http",
+    "method": "GET",
+    "x402Version": 2,
+    "description": "Real-time equity market pricing and trading volume for listed companies",
+    "serviceName": "MarketPulse",
+    "tags": [
+      "finance",
+      "equities"
+    ],
+    "payTo": "GBHEGW3KWOY2OFH767EDALFGCUTBOEVBDQMCKU4APMDLQNBW5QV3W3KO",
+    "scheme": "exact",
+    "network": "stellar:testnet",
+    "requirements": {
+      "scheme": "exact",
+      "network": "stellar:testnet",
+      "amount": "12000"
+    }
+  },
+  {
+    "resourceUrl": "https://api.example.com/svc/k1l2",
+    "type": "http",
+    "method": "POST",
+    "x402Version": 2,
+    "description": "Create original pictures from a written prompt using a diffusion model",
+    "serviceName": "PixelDream",
+    "tags": [
+      "ai",
+      "images"
+    ],
+    "payTo": "GBHEGW3KWOY2OFH767EDALFGCUTBOEVBDQMCKU4APMDLQNBW5QV3W3KO",
+    "scheme": "upto",
+    "network": "stellar:testnet",
+    "requirements": {
+      "scheme": "upto",
+      "network": "stellar:testnet",
+      "amount": "2000000"
+    }
+  },
+  {
+    "resourceUrl": "https://api.example.com/svc/m3n4",
+    "type": "http",
+    "method": "POST",
+    "x402Version": 2,
+    "description": "Convert uploaded video files between formats and resolutions on demand",
+    "serviceName": "ReelConvert",
+    "tags": [
+      "video",
+      "media"
+    ],
+    "payTo": "GBHEGW3KWOY2OFH767EDALFGCUTBOEVBDQMCKU4APMDLQNBW5QV3W3KO",
+    "scheme": "upto",
+    "network": "stellar:testnet",
+    "requirements": {
+      "scheme": "upto",
+      "network": "stellar:testnet",
+      "amount": "3000000"
+    }
+  },
+  {
+    "resourceUrl": "https://api.example.com/svc/o5p6",
+    "type": "http",
+    "method": "POST",
+    "x402Version": 2,
+    "description": "Render written text from one human language into another, over 40 languages supported",
+    "serviceName": "Lingua Bridge",
+    "tags": [
+      "language",
+      "localization"
+    ],
+    "payTo": "GBHEGW3KWOY2OFH767EDALFGCUTBOEVBDQMCKU4APMDLQNBW5QV3W3KO",
+    "scheme": "exact",
+    "network": "stellar:testnet",
+    "requirements": {
+      "scheme": "exact",
+      "network": "stellar:testnet",
+      "amount": "3000"
+    }
+  },
+  {
+    "resourceUrl": "https://api.example.com/svc/q7r8",
+    "type": "http",
+    "method": "GET",
+    "x402Version": 2,
+    "description": "Satellite imagery tiles and elevation data for map rendering applications",
+    "serviceName": "TerraTiles",
+    "tags": [
+      "maps",
+      "satellite"
+    ],
+    "payTo": "GBHEGW3KWOY2OFH767EDALFGCUTBOEVBDQMCKU4APMDLQNBW5QV3W3KO",
+    "scheme": "exact",
+    "network": "stellar:testnet",
+    "requirements": {
+      "scheme": "exact",
+      "network": "stellar:testnet",
+      "amount": "6000"
+    }
+  },
+  {
+    "resourceUrl": "https://api.example.com/svc/s9t0",
+    "type": "http",
+    "method": "POST",
+    "x402Version": 2,
+    "description": "Submit 3D scene files for distributed frame rendering at scale",
+    "serviceName": "FrameForge",
+    "tags": [
+      "compute",
+      "graphics"
+    ],
+    "payTo": "GBHEGW3KWOY2OFH767EDALFGCUTBOEVBDQMCKU4APMDLQNBW5QV3W3KO",
+    "scheme": "upto",
+    "network": "stellar:testnet",
+    "requirements": {
+      "scheme": "upto",
+      "network": "stellar:testnet",
+      "amount": "5000000"
+    }
+  },
+  {
+    "resourceUrl": "https://api.example.com/svc/u1v2",
+    "type": "http",
+    "method": "POST",
+    "x402Version": 2,
+    "description": "Execute untrusted source code in an isolated container and return stdout",
+    "serviceName": "RunBox",
+    "tags": [
+      "compute",
+      "execution"
+    ],
+    "payTo": "GBHEGW3KWOY2OFH767EDALFGCUTBOEVBDQMCKU4APMDLQNBW5QV3W3KO",
+    "scheme": "upto",
+    "network": "stellar:testnet",
+    "requirements": {
+      "scheme": "upto",
+      "network": "stellar:testnet",
+      "amount": "1000000"
+    }
+  },
+  {
+    "resourceUrl": "https://api.example.com/svc/w3x4",
+    "type": "http",
+    "method": "POST",
+    "x402Version": 2,
+    "description": "Synthesize natural-sounding spoken audio from written input",
+    "serviceName": "VoiceCast",
+    "tags": [
+      "audio",
+      "ai"
+    ],
+    "payTo": "GBHEGW3KWOY2OFH767EDALFGCUTBOEVBDQMCKU4APMDLQNBW5QV3W3KO",
+    "scheme": "exact",
+    "network": "stellar:testnet",
+    "requirements": {
+      "scheme": "exact",
+      "network": "stellar:testnet",
+      "amount": "4000"
+    }
+  }
+]

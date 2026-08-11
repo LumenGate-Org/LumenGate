@@ -1,0 +1,27 @@
+{
+  "name": "@x402-stellar/discovery",
+  "version": "0.1.0",
+  "description": "Bazaar discovery catalog (PostgreSQL/pgvector hybrid search) and HTTP endpoints for the x402 Stellar facilitator",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "eval:search": "tsx eval/evaluate.ts"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "^0.5.4",
+    "@electric-sql/pglite-pgvector": "^0.0.5",
+    "@huggingface/transformers": "^4.2.0",
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "tsx": "^4.23.10",
+    "typescript": "^5.7.3",
+    "vitest": "^3.0.5"
+  }
+}
