@@ -44,6 +44,29 @@ const MIN_SEMANTIC_SIMILARITY = 0.15;
 // retries, but still bounds a spammed/never-settled entry's visibility to
 // a fixed window rather than forever — see "Automatic cataloging" below.
 export const DEFAULT_PROVISIONAL_TTL_MS = 15 * 60 * 1000;
+// Usage-based ranking window (see docs/bazaar-usage-ranking-design.md, §5
+// "Derived signals" and §6 "Retention"): both the 30-day rolling average
+// and the `resource_buyers` retention sweep use the same window.
+const USAGE_WINDOW_DAYS = 30;
+
+/** Per-resource usage signals, windowed to the last `USAGE_WINDOW_DAYS` days (see `usageStatsFor`). */
+export interface UsageStats {
+  avgUniqueBuyers30d: number;
+  avgDailyCalls30d: number;
+  /** The most recent date (YYYY-MM-DD) this resource was used at all, or `undefined` if never. */
+  activityRecency: string | undefined;
+}
+
+function isoDate(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+/** `days` before/after (negative) `fromIsoDate` — unlike a `Date.now()`-relative helper, this composes correctly with a test's `asOf` override. */
+function offsetDate(fromIsoDate: string, days: number): string {
+  const d = new Date(`${fromIsoDate}T00:00:00.000Z`);
+  d.setUTCDate(d.getUTCDate() + days);
+  return isoDate(d);
+}
 
 /**
  * Computes the catalog's unique resource id: `resourceUrl` for HTTP resources,
@@ -51,7 +74,7 @@ export const DEFAULT_PROVISIONAL_TTL_MS = 15 * 60 * 1000;
  * multiplexes multiple tools over one endpoint, so `resourceUrl` alone isn't
  * a unique key).
  */
-function resourceId(input: Pick<DiscoveredResourceInput, "resourceUrl" | "type" | "toolName">): string {
+export function resourceId(input: Pick<DiscoveredResourceInput, "resourceUrl" | "type" | "toolName">): string {
   return input.type === "mcp" && input.toolName
     ? `${input.resourceUrl}#${input.toolName}`
     : input.resourceUrl;
@@ -103,6 +126,17 @@ function fromRow(row: any): CatalogResource {
 
 function toVectorLiteral(vec: Float32Array): string {
   return `[${Array.from(vec).join(",")}]`;
+}
+
+/**
+ * Orders two candidates by `(avgUniqueBuyers30d, avgDailyCalls30d,
+ * activityRecency)` descending, each field breaking ties in the previous —
+ * §2.2's usage-popularity ordering, most-used first.
+ */
+function compareUsage(a: UsageStats, b: UsageStats): number {
+  if (b.avgUniqueBuyers30d !== a.avgUniqueBuyers30d) return b.avgUniqueBuyers30d - a.avgUniqueBuyers30d;
+  if (b.avgDailyCalls30d !== a.avgDailyCalls30d) return b.avgDailyCalls30d - a.avgDailyCalls30d;
+  return (b.activityRecency ?? "").localeCompare(a.activityRecency ?? "");
 }
 
 /**
@@ -192,6 +226,33 @@ export class BazaarCatalog {
         payload TEXT NOT NULL,
         enqueued_at TEXT NOT NULL
       );
+
+      -- Usage-based ranking (see docs/bazaar-usage-ranking-design.md).
+      -- Per-resource, per-day call/unique-buyer counters, retained
+      -- indefinitely (§6 — this history is what lets a usage trend be
+      -- tracked over time, not just a rolling snapshot).
+      CREATE TABLE IF NOT EXISTS resource_usage_daily (
+        resource_id TEXT NOT NULL REFERENCES resources(id),
+        date DATE NOT NULL,
+        total_calls INTEGER NOT NULL DEFAULT 0,
+        unique_buyers INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (resource_id, date)
+      );
+      CREATE INDEX IF NOT EXISTS idx_resource_usage_daily_date ON resource_usage_daily(date);
+
+      -- Tracks each buyer's most recent activity date per resource — the
+      -- dedup structure §4's write-path upsert uses to compute a correct
+      -- per-day unique count, and the table §6's retention sweep prunes (30
+      -- active-day window; unlike resource_usage_daily, this table is NOT
+      -- kept indefinitely — its only purpose is answering "who's active
+      -- right now").
+      CREATE TABLE IF NOT EXISTS resource_buyers (
+        resource_id TEXT NOT NULL REFERENCES resources(id),
+        buyer TEXT NOT NULL,
+        last_seen_date DATE NOT NULL,
+        PRIMARY KEY (resource_id, buyer)
+      );
+      CREATE INDEX IF NOT EXISTS idx_resource_buyers_last_seen ON resource_buyers(last_seen_date);
     `);
     // Forward-compatible schema evolution: Postgres's ADD COLUMN IF NOT
     // EXISTS is natively idempotent (unlike SQLite, which needed a manual
@@ -355,7 +416,151 @@ export class BazaarCatalog {
     return result.rows.length;
   }
 
-  private async getById(id: string): Promise<CatalogResource | undefined> {
+  /**
+   * Records one settled call against `resourceId` — the write path from
+   * docs/bazaar-usage-ranking-design.md §4, one atomic upsert covering both
+   * usage tables. `total_calls` increments unconditionally; `unique_buyers`
+   * only increments the first time this `(resourceId, buyer)` pair is seen
+   * on `asOf`, and only when `settledAmount >= minUniqueBuyerAmount` — the
+   * Sybil-resistance gate from §2.3: sponsored network fees make minting
+   * distinct addresses free, so counting *every* distinct address toward
+   * "unique buyers" would be free to inflate; gating on a real settled
+   * amount raises the cost of that back up. This does not eliminate the
+   * attack (a funded attacker can still pay the threshold per fake
+   * account) — it only removes the free version of it. `total_calls` stays
+   * ungated deliberately: it's already the weaker, gameable-by-one-buyer
+   * signal `unique_buyers` is the primary sort key specifically to avoid
+   * relying on.
+   *
+   * Callers are responsible for confirming `resourceId` is actually
+   * cataloged first (`getById`) — `resource_usage_daily`/`resource_buyers`
+   * both have a `REFERENCES resources(id)` foreign key, so recording usage
+   * against a resource that was never (or not yet) cataloged fails at the
+   * database level rather than silently creating an orphaned row.
+   *
+   * @param resourceId - The catalog id usage is being recorded against (see `resourceId()`)
+   * @param buyer - The address that paid for this call (`SettleResponse.payer`)
+   * @param settledAmount - The atomic-unit amount actually settled for this call
+   * @param minUniqueBuyerAmount - The `minSettledAmountForUniqueBuyerCredit` threshold (§2.3), in the same atomic units
+   * @param options.asOf - Overrides "today" (YYYY-MM-DD) — test seam; real callers omit it
+   */
+  async recordUsage(
+    resourceId: string,
+    buyer: string,
+    settledAmount: bigint,
+    minUniqueBuyerAmount: bigint,
+    options: { asOf?: string } = {},
+  ): Promise<void> {
+    await this.ready;
+    const date = options.asOf ?? isoDate(new Date());
+    await this.db.query(
+      `WITH upsert AS (
+         INSERT INTO resource_buyers (resource_id, buyer, last_seen_date)
+         VALUES ($1, $2, $5::date)
+         ON CONFLICT (resource_id, buyer) DO UPDATE
+           SET last_seen_date = EXCLUDED.last_seen_date
+         WHERE resource_buyers.last_seen_date IS DISTINCT FROM EXCLUDED.last_seen_date
+         RETURNING resource_id
+       )
+       INSERT INTO resource_usage_daily (resource_id, date, total_calls, unique_buyers)
+       VALUES (
+         $1, $5::date, 1,
+         CASE WHEN $3::numeric >= $4::numeric THEN (SELECT COUNT(*) FROM upsert) ELSE 0 END
+       )
+       ON CONFLICT (resource_id, date) DO UPDATE SET
+         total_calls = resource_usage_daily.total_calls + 1,
+         unique_buyers = resource_usage_daily.unique_buyers +
+           CASE WHEN $3::numeric >= $4::numeric THEN (SELECT COUNT(*) FROM upsert) ELSE 0 END`,
+      [resourceId, buyer, settledAmount.toString(), minUniqueBuyerAmount.toString(), date],
+    );
+  }
+
+  /**
+   * Computes `UsageStats` (§5's derived signals) for exactly the given
+   * candidate `ids`, windowed to the last `USAGE_WINDOW_DAYS` days — never
+   * a broader set, since `search()`'s usage-ranking pass must only ever
+   * reorder within a candidate set the relevance stages already selected
+   * (§2.2), never introduce new candidates by querying usage independently.
+   * A resource absent from the returned map has no usage history in the
+   * window at all (distinct from having zero calls on a day it does have a
+   * row for).
+   *
+   * `SUM(...) / USAGE_WINDOW_DAYS`, not `AVG(...)`: `resource_usage_daily`
+   * only has a row on days with actual activity, so `AVG()` would divide by
+   * the count of *active* days only, overstating the true 30-day average
+   * for anything used on fewer than 30 of the last 30 days — see §5's
+   * "Corrected per direct feedback" for the full reasoning.
+   *
+   * @param ids - The candidate resource ids to compute stats for (typically a search()-stage candidate set)
+   * @param options.asOf - Overrides "today" for the window's end — test seam; real callers omit it
+   */
+  async usageStatsFor(ids: readonly string[], options: { asOf?: string } = {}): Promise<Map<string, UsageStats>> {
+    await this.ready;
+    const stats = new Map<string, UsageStats>();
+    if (ids.length === 0) return stats;
+
+    const asOf = options.asOf ?? isoDate(new Date());
+    const windowStart = offsetDate(asOf, -(USAGE_WINDOW_DAYS - 1));
+    const placeholders = ids.map((_, i) => `$${i + 3}`).join(", ");
+    const result = await this.db.query<{
+      resource_id: string;
+      avg_unique_buyers_30d: string;
+      avg_daily_calls_30d: string;
+      // PGlite returns a `DATE` aggregate (`MAX(date)`) as a JS `Date`, not
+      // the plain string every other date value in this file is kept as —
+      // normalized back to `YYYY-MM-DD` below via `isoDate`, so `UsageStats`
+      // has one consistent date representation regardless of driver quirks.
+      activity_recency: Date | string;
+    }>(
+      `SELECT resource_id,
+         (SUM(unique_buyers)::numeric / ${USAGE_WINDOW_DAYS}) AS avg_unique_buyers_30d,
+         (SUM(total_calls)::numeric / ${USAGE_WINDOW_DAYS}) AS avg_daily_calls_30d,
+         MAX(date) AS activity_recency
+       FROM resource_usage_daily
+       WHERE date BETWEEN $1::date AND $2::date AND resource_id IN (${placeholders})
+       GROUP BY resource_id`,
+      [windowStart, asOf, ...ids],
+    );
+
+    for (const row of result.rows) {
+      stats.set(row.resource_id, {
+        avgUniqueBuyers30d: Number(row.avg_unique_buyers_30d),
+        avgDailyCalls30d: Number(row.avg_daily_calls_30d),
+        activityRecency: isoDate(new Date(row.activity_recency)),
+      });
+    }
+    return stats;
+  }
+
+  /**
+   * Prunes `resource_buyers` rows whose `last_seen_date` has fallen outside
+   * the `USAGE_WINDOW_DAYS`-day active window (§6's retention rule) —
+   * intended to be called periodically by `packages/facilitator/src/indexer.ts`,
+   * the same way `evictExpiredProvisional` is. `resource_usage_daily` is
+   * deliberately never pruned here (or anywhere): §6 keeps that table's
+   * history indefinitely, since it's what lets a usage trend be tracked
+   * over time, not just a rolling snapshot.
+   *
+   * @returns The number of pruned rows
+   */
+  async pruneStaleBuyers(): Promise<number> {
+    await this.ready;
+    const cutoff = offsetDate(isoDate(new Date()), -USAGE_WINDOW_DAYS);
+    const result = await this.db.query(`DELETE FROM resource_buyers WHERE last_seen_date < $1::date RETURNING resource_id`, [
+      cutoff,
+    ]);
+    return result.rows.length;
+  }
+
+  /**
+   * Looks up a resource by its catalog id (see `resourceId`). Public so
+   * callers outside this class can check what a resource is *currently*
+   * cataloged as before writing a new `upsert` over it — e.g.
+   * `createBazaarCatalogingHook`'s resource-ownership check, which needs to
+   * know whether a settlement is about to change an already-confirmed
+   * resource's `payTo` before that overwrite happens.
+   */
+  async getById(id: string): Promise<CatalogResource | undefined> {
     const result = await this.db.query(`SELECT * FROM resources WHERE id = $1`, [id]);
     return result.rows.length > 0 ? fromRow(result.rows[0]) : undefined;
   }
@@ -394,15 +599,35 @@ export class BazaarCatalog {
    * class docs above for the full rationale and "Search quality
    * evaluation" in docs/architecture.md for how this is measured.
    *
+   * A third, optional `"usage"` channel (docs/bazaar-usage-ranking-design.md
+   * §2.2) runs as a *second* Reciprocal Rank Fusion pass on top of the
+   * first: it never retrieves independently or introduces a candidate the
+   * lexical/vector channels didn't already select — it only reorders within
+   * that set, by `(avgUniqueBuyers30d, avgDailyCalls30d, activityRecency)`
+   * descending, folded in via the exact same RRF loop shape as the first
+   * pass. **Scope note**: the design document also specifies an L2
+   * semantic-reranking stage (§2.1) that would sit between the first RRF
+   * pass and this one, replacing "the lexical/vector-fused order" with "the
+   * L2-reranked order" as what usage reorders. That stage is not
+   * implemented here — a real cross-encoder reranker is a separate,
+   * heavier addition (a new model dependency, meaningful added latency; see
+   * §2.1's own measured numbers) deliberately left for its own pass, not
+   * bundled into this one. Usage therefore reorders the first-stage
+   * RRF-fused (lexical+vector) order directly, consistent with §8's
+   * design intent that usage and L2 reranking are independently toggleable
+   * — this ships the one without waiting on the other.
+   *
    * @param filters - Query text plus Bazaar's standard filters
-   * @param options - `channels` restricts retrieval to a subset of the two
-   *   channels (default both) — not used by the HTTP endpoint, only by
-   *   `eval/evaluate.ts` to report a lexical-only baseline alongside the
-   *   real hybrid result.
+   * @param options - `channels` restricts retrieval to a subset of channels
+   *   (default: lexical + vector, matching pre-usage-ranking behavior — the
+   *   HTTP endpoint opts into `"usage"` explicitly via `createDiscoveryRouter`'s
+   *   own option, so it stays instantly toggleable without an app-level code
+   *   change); `eval/evaluate.ts` also uses this to report a lexical-only
+   *   baseline alongside the real hybrid result.
    */
   async search(
     filters: SearchFilters,
-    options: { channels?: ("lexical" | "vector")[] } = {},
+    options: { channels?: ("lexical" | "vector" | "usage")[] } = {},
   ): Promise<SearchResult> {
     await this.ready;
     const channels = options.channels ?? ["lexical", "vector"];
@@ -461,6 +686,25 @@ export class BazaarCatalog {
       fusedScores.set(id, (fusedScores.get(id) ?? 0) + 1 / (RRF_K + rank));
     }
 
+    // --- Usage as a second RRF pass (§2.2): reorders only within the
+    // candidate set the two channels above already selected — `candidateIds`
+    // is exactly `fusedScores`' current key set, so `usageStatsFor` can
+    // never hand back a ranking for a resource that isn't already a
+    // candidate, and this loop can never introduce one. ---
+    if (channels.includes("usage") && fusedScores.size > 0) {
+      const candidateIds = [...fusedScores.keys()];
+      const usageStats = await this.usageStatsFor(candidateIds);
+      if (usageStats.size > 0) {
+        const usageOrder = candidateIds
+          .filter(id => usageStats.has(id))
+          .sort((a, b) => compareUsage(usageStats.get(a)!, usageStats.get(b)!));
+        usageOrder.forEach((id, i) => {
+          const rank = i + 1;
+          fusedScores.set(id, (fusedScores.get(id) ?? 0) + 1 / (RRF_K + rank));
+        });
+      }
+    }
+
     const fusedOrder = [...fusedScores.entries()].sort((a, b) => b[1] - a[1]).map(([id]) => id);
 
     const partialResults = fusedOrder.length > offset + limit;
@@ -498,7 +742,7 @@ export class BazaarCatalog {
    */
   async clear(): Promise<void> {
     await this.ready;
-    await this.db.exec(`TRUNCATE resources, pending_catalog;`);
+    await this.db.exec(`TRUNCATE resources, pending_catalog, resource_usage_daily, resource_buyers;`);
   }
 }
 

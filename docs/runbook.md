@@ -116,6 +116,24 @@ billing ledger in particular is the source of truth for off-chain invoicing
 (settlements are still correct on-chain) but does lose the facilitator's
 own revenue records or discovery catalog, respectively.
 
+**Outbound network dependency during settlement.** Cataloging a brand-new
+resource, or one whose `payTo` is changing, now makes a live outbound HTTP
+request back to that resource's own URL to confirm ownership before
+publishing it — see "resource-ownership verification" in
+`docs/architecture.md`. Worth being precise about the cost: `onAfterSettle`
+hooks run synchronously before `settle()`'s HTTP response returns
+(`@x402/core`'s `x402Facilitator` awaits each hook in registration order),
+so this check adds up to its 5s timeout to the *caller-visible* `/settle`
+latency for that minority of requests — not a background/async check. The
+on-chain settlement itself is already final by the time this hook runs
+(funds have moved regardless of what this check finds), and it's fails
+closed and gated (skipped whenever an existing resource's `payTo` isn't
+changing — the common case), but a resource server that's slow or
+unreachable at exactly the moment of its own first-time or payTo-changing
+settlement will make that specific `/settle` call visibly slower for the
+buyer. Accepted as a proportionate cost for the integrity guarantee it
+buys, not something to silently smooth over.
+
 ## Running the indexer (catalog reconciler)
 
 A genuinely separate process from the facilitator's HTTP server, with two

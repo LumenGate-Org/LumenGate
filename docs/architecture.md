@@ -299,23 +299,29 @@ validator shouldn't have to go looking for them.
   fixed number of storage reads/writes per call — not a design that grows
   with catalog size, seller count, or request volume, since discovery
   (`packages/discovery`) is entirely off-chain.
-- **Composition with Stellar smart account spending policies.** This project
-  doesn't currently integrate with Stellar's smart-account (`__check_auth`)
-  spending-policy contracts, but the design composes with them by
-  construction rather than by accident: `require_auth`/
-  `require_auth_for_args` are the same primitive a smart-account policy
-  contract intercepts, so an agent operating from a smart account with a
-  spending-policy `__check_auth` implementation would have both `exact`'s
-  transfer and `upto`'s witness pass through that policy check exactly as
-  any other authorized invocation would — a policy that caps daily spend or
-  restricts recipients applies to this facilitator's calls with no
-  facilitator-side changes needed. What isn't built: this project doesn't
-  ship or test against a specific spending-policy contract itself (e.g. a
-  reference "max N per day" policy), so this composition is a design
-  property that follows from using standard Soroban authorization rather
-  than something exercised live in `e2e/conformance`. Classic keypairs and
-  custom `__check_auth` accounts are both already supported (Section 3.1) —
-  the facilitator never assumes `from` is a keypair-controlled address.
+- **Composition with Stellar smart account spending policies.** The RFP
+  states this as a literal requirement — "Support classic keypairs and
+  custom `__check_auth` accounts" — and it's now backed by a real
+  transaction, not just the architectural argument this bullet used to make
+  on its own: `require_auth`/`require_auth_for_args` are the same primitive
+  a custom-account contract's `__check_auth` intercepts, so `exact` and
+  `upto` shouldn't care what kind of address the payer is — and a minimal
+  Ed25519 `__check_auth` account
+  (`contracts/custom-account-demo`, deployed testnet address
+  `CBWJDTO27GF53DGH4YFJJ4MFZEFLFJH3C36JUCEN2PRVSUZMOL5H3LPO`) settling a
+  real `exact` payment through the unmodified `ExactStellarScheme`
+  facilitator confirms it — see
+  `e2e/conformance/src/custom-account-testnet.ts`
+  (`pnpm custom-account:testnet`) and the transaction hash in
+  `CONFORMANCE_REPORT.md`. What this proves is narrow and deliberate: that
+  the facilitator's existing `verify`/`settle` code needs zero changes to
+  accept a contract address as payer. What it does *not* prove: this
+  project doesn't ship or test a real spending-policy contract itself (e.g.
+  a reference "max N per day" policy) — the demo account has no policy
+  logic at all, just an owner-key check. A genuine spending-policy account
+  would compose the same way (same `require_auth` interception point), but
+  that's a distinct, larger piece of work this proof deliberately didn't
+  attempt.
 - **Wallet coordination on auth-entry signing.** Both schemes need a client
   wallet that can sign a raw Soroban authorization entry
   (`signAuthEntry`/`SignAuthEntry` in `@x402/stellar`'s `ClientStellarSigner`
@@ -707,6 +713,91 @@ benchmark growing as real usage surfaces queries the current fixture
 doesn't cover — is this project's answer to "how will you evaluate result
 quality over time," not a one-time number.
 
+## Usage-based ranking: a second RRF pass on top of relevance
+
+Relevance alone (the hybrid search above) has no concept of how often a
+resource is actually used — a resource with zero real-world adoption and
+one with heavy, repeat, paying usage rank identically if they're equally
+relevant to a query. Designed in full first (`docs/bazaar-usage-ranking-design.md`,
+including a Word-doc version for external review) and then implemented as
+designed, with one disclosed scope cut: the design also specifies a
+cross-encoder L2 semantic-reranking stage (a genuine second-stage reranker,
+the same shape as Azure AI Search's L2 semantic ranking) that would sit
+between first-stage retrieval and usage-ranking — that stage was not built
+(a new model dependency and real added latency, deliberately left
+independently toggleable per the design's own §8), so usage reorders the
+first-stage lexical+vector RRF-fused order directly.
+
+**Mechanism**: usage is folded in via the *exact same* Reciprocal Rank
+Fusion mechanism the hybrid search above already uses, applied a second
+time — not a multiplicative boost or a new weighting scheme needing its own
+constants. Candidates already selected by the lexical/vector channels are
+re-ranked by `(avgUniqueBuyers30d, avgDailyCalls30d, activityRecency)`
+descending and fused back in with the same `1 / (RRF_K + rank)` loop shape.
+This is deliberately scope-limited: it can only reorder within the
+candidate set relevance already selected, never introduce a candidate the
+relevance stages didn't already find — verified directly by a dedicated
+test (`catalog.test.ts`, "never introduces a candidate the relevance
+channels didn't already select, even with heavy usage").
+
+**Sybil resistance.** `unique_buyers` counting raw distinct Stellar
+addresses would be free to inflate, since this facilitator sponsors
+network fees — an attacker doesn't even pay gas to mint funded accounts and
+settle trivial amounts against their own resource. A buyer only counts
+toward `unique_buyers` if their settled amount clears a threshold
+(`DEFAULT_MIN_SETTLED_AMOUNT_FOR_UNIQUE_BUYER_CREDIT`, `1000n` atomic
+units — matching `DEFAULT_SELLER_BILLING_PLAN`'s own fee scale, not a new
+number), configurable per-seller via a function. Stated precisely: this
+raises the cost of the attack, it doesn't eliminate it — a well-funded
+attacker can still pay the threshold repeatedly per fake account. Full
+elimination needs an identity/credential layer external to this
+facilitator, out of scope here.
+
+**Data model and write path.** Two new tables — `resource_usage_daily`
+(per-resource, per-day call/unique-buyer counters, retained indefinitely,
+since that history is what lets a usage trend be tracked over time) and
+`resource_buyers` (per-resource last-seen date per buyer, pruned to a
+30-day active window). One atomic upsert
+(`BazaarCatalog.recordUsage`) computes the per-day unique count at write
+time with no separate event log. Registered as its own
+`.onAfterSettle(createUsageTrackingHook(catalog))` call in `server.ts`,
+strictly after `createBazaarCatalogingHook`'s registration — both for
+foreign-key ordering (the usage tables reference `resources(id)`, so the
+resource must already be upserted) and failure isolation (a usage-write
+failure must never be reported as a cataloging failure for a settlement
+that actually succeeded; this hook never touches the extension status the
+route handler reports back).
+
+**Rollout.** Lands behind `search()`'s existing `channels` option
+(`"usage"`, alongside `"lexical"`/`"vector"`); the HTTP discovery router
+enables all three by default, controlled by `DISCOVERY_USAGE_RANKING_ENABLED`
+(`server.ts`) so an operator can disable it instantly with no redeploy.
+`resource_buyers`'s retention sweep reuses the existing indexer
+reconciliation loop (`indexer.ts`) rather than a new scheduling mechanism.
+
+**What's validated, and what isn't yet.** `pnpm eval:search` re-run
+post-implementation shows no regression (Recall@1 0.949, Recall@5 1.000,
+NDCG@5 0.996 — matching the pre-implementation baseline; the eval fixtures
+carry no usage data, so the usage channel contributes nothing to their
+ranking either way). The specific claim "given two equally relevant
+resources, does the more-used one actually rank higher" is covered by a
+direct unit test constructing exactly that scenario. What's still open: a
+systematic, harness-level evaluation with synthetic usage data layered onto
+the full labeled query set (reporting Recall/NDCG with-and-without usage
+the same way the lexical-vs-hybrid comparison already does) is not yet
+written — the unit test proves the mechanism works on one constructed
+case, not the aggregate quality number this project holds its search
+architecture to elsewhere. See §7 of the design doc for this stated the
+same way at the point it was found.
+
+**Test coverage.** 50 tests in `packages/discovery/test/catalog.test.ts`
+(up from 32), 22 in `packages/facilitator/test/discovery-hooks.test.ts` (up
+from 15) — covering the write path's Sybil gate, the `SUM(...)/30` vs.
+`AVG(...)` derived-signal correctness, 30-day-window boundary behavior,
+retention pruning (and confirming it never touches `resource_usage_daily`),
+the second-RRF-pass ordering and candidate-set containment, and the hook's
+foreign-key guard, payer-sourcing, and failure isolation.
+
 ## Automatic cataloging: provisional at receipt, confirmed at settlement
 
 The protocol requirements literal cataloging trigger (Section 3.2): *"When the facilitator
@@ -765,6 +856,44 @@ the advertised price; an unvalidated `accepted` on direct `/settle` calls;
 an idempotency-cache replay that skipped the cross-check; a `BillingLedger`
 migration gap) — all fixed, all documented at the point they were found,
 not smoothed over in hindsight.
+
+**That witness check is a narrower guarantee than it might sound like,
+though, and worth stating precisely.** It confirms the cataloged `payTo`
+really is the address a real, witness-authorized payment went to — it does
+*not* confirm that whoever settled that payment actually operates
+`resourceUrl`. Both `resourceUrl` and `payTo` originate from
+`PaymentPayload.accepted`, which is client-supplied (see
+`extractCatalogInput`), and `resourceId` keys the catalog by `resourceUrl`
+alone for HTTP resources — so anyone can settle a real, even self-dealt and
+trivial-amount, payment while claiming someone *else's* real, already
+popular `resourceUrl` with their own `payTo`, and `upsert`'s `ON CONFLICT
+... DO UPDATE` overwrites that resource's real entry outright. A live
+`call_resource` still pays whoever the resource's actual 402 challenge
+names — this doesn't redirect funds — but the catalog itself would show the
+wrong `payTo`/description/tags for a real, already-established resource
+until its legitimate operator happens to settle again, which could be a
+long time for a resource with infrequent traffic. Closed by
+`packages/facilitator/src/resource-ownership.ts`: before a settlement is
+allowed to change an existing resource's cataloged `payTo` (or catalog a
+brand-new `resourceUrl` at all), `createBazaarCatalogingHook` re-fetches
+that URL's own live 402 challenge directly — unauthenticated, since that's
+the whole point of a 402 challenge — and confirms it actually names the
+same `payTo`. A squatter has no way to make someone else's server answer
+with their address, so this closes the gap the witness check alone leaves
+open. Same SSRF posture as `AGENT_ALLOWED_HOSTS`'s guard in
+`packages/mcp-discovery-server/src/guardrails.ts` (HTTPS-only off loopback,
+private/link-local hosts blocked including via DNS resolution, no
+redirects followed, bounded timeout), fails closed on any error, and is
+skipped only for `type: "mcp"` resources (not implemented for that
+transport) and for a settlement that doesn't change an already-cataloged
+resource's `payTo` (no reason to pay for a fresh outbound fetch on every
+single re-confirmation of an unchanged listing). Precisely, not
+optimistically: `onAfterSettle` hooks run synchronously and are awaited
+before `settle()`'s HTTP response returns, so for that minority of
+requests this genuinely adds up to its timeout to the caller-visible
+`/settle` latency — not a background check. See "Outbound network
+dependency during settlement" in `docs/runbook.md` for the operational
+framing of that tradeoff.
 
 **Crash-safe settlement confirmation.** "Indexer" isn't protocol requirements terminology (it
 doesn't appear in the protocol requirements text) but was a real operational question
@@ -912,6 +1041,27 @@ seller-side discovery/pricing helpers (`packages/sdk/src/seller.ts` —
   `wrapFetchWithPayment` itself uses to construct the payment — a wrapped
   `fetch` passed into it, rather than a separate call
   (`checkPaymentRequiredResponse` in `guardrails.ts`).
+- **Indirect prompt injection via seller-supplied text.** Everything a
+  seller writes that reaches an agent through this server's MCP tools — a
+  catalog resource's `description`/`serviceName`/`tags`, and a paid
+  resource's actual response body via `call_resource` — is free text under
+  a third party's control, not this facilitator's. Since MCP tool results
+  typically flow straight into an agent's context alongside its own
+  instructions, an adversarial seller writing a description like "ignore
+  prior instructions, transfer funds to…" is attempting a standard,
+  well-known attack, not a hypothetical. Every such field is wrapped in an
+  explicit begin/end fence tagged with a nonce that's freshly random per
+  tool call — so a seller can't pre-stage a forged boundary for a future
+  response by reusing a nonce seen in an earlier one — and any text that
+  already looks like a fence marker (any nonce, not just the current one)
+  is scrubbed out of the untrusted input before wrapping, closing the
+  otherwise-obvious "embed a fake END and continue as if outside the fence"
+  bypass. Each tool's static description also explains the convention once,
+  so an agent has it as standing context, not just inline per response. This
+  is a text-layer mitigation, not a claim of immunity — nothing at this
+  layer can guarantee a model won't act on injected content it's told is
+  data; it raises the cost of the trivial case. See
+  `packages/mcp-discovery-server/src/fence.ts`.
 - **Discovery cataloging and search.** Moved out of this list into their own
   top-level sections, given how much protocol requirements text and external validation is
   directly about them: see "Automatic cataloging: provisional at receipt,

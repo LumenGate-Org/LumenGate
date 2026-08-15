@@ -20,6 +20,7 @@ import {
   createBazaarCatalogingHook,
   createBazaarFailureHook,
   createBazaarVerifyPreviewHook,
+  createUsageTrackingHook,
   getBazaarExtensionStatus,
 } from "./discovery-hooks.js";
 import { formatPrometheusMetrics, type MetricFamily, type MetricSample } from "./metrics.js";
@@ -32,6 +33,13 @@ const BILLING_DB_PATH = process.env.BILLING_DB_PATH ?? "./data/billing.db";
 // X-Billing-Admin-Token on GET /billing/usage before exposing per-seller
 // volume data in a real deployment.
 const BILLING_ADMIN_TOKEN = process.env.BILLING_ADMIN_TOKEN;
+// On by default — the usage-ranking channel (docs/bazaar-usage-ranking-design.md
+// §2.2) is cheap (one indexed query per search, cold-start-safe RRF fusion)
+// and additive-only (never introduces a candidate the relevance channels
+// didn't already select). Set to "false" to disable it instantly — e.g. if
+// it's ever suspected of misbehaving — without an app-level code change or
+// redeploy, per §8's explicit toggle requirement.
+const DISCOVERY_USAGE_RANKING_ENABLED = process.env.DISCOVERY_USAGE_RANKING_ENABLED !== "false";
 
 const secrets = (process.env.STELLAR_FACILITATOR_SECRETS ?? process.env.STELLAR_FACILITATOR_SECRET ?? "")
   .split(",")
@@ -101,6 +109,10 @@ const facilitator = new x402Facilitator()
   .onAfterVerify(createBazaarVerifyPreviewHook(catalog))
   .onVerifyFailure(createBazaarFailureHook())
   .onAfterSettle(createBazaarCatalogingHook(catalog))
+  // Registered after createBazaarCatalogingHook, not merged into it — see
+  // createUsageTrackingHook's doc comment for the foreign-key-ordering and
+  // failure-isolation reasons this needs to be its own, later hook.
+  .onAfterSettle(createUsageTrackingHook(catalog))
   .onAfterSettle(async context => {
     if (!context.result.success) return;
     const extra = context.requirements.extra as { feeBps?: number } | undefined;
@@ -345,7 +357,12 @@ app.get("/supported", (_req: Request, res: Response) => {
   }
 });
 
-app.use("/discovery", createDiscoveryRouter(catalog));
+app.use(
+  "/discovery",
+  createDiscoveryRouter(catalog, {
+    searchChannels: DISCOVERY_USAGE_RANKING_ENABLED ? ["lexical", "vector", "usage"] : ["lexical", "vector"],
+  }),
+);
 
 app.get("/billing/usage", (req: Request, res: Response) => {
   if (BILLING_ADMIN_TOKEN && req.header("X-Billing-Admin-Token") !== BILLING_ADMIN_TOKEN) {

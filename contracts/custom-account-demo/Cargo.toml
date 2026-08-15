@@ -1,0 +1,27 @@
+[package]
+name = "x402-custom-account-demo"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Minimal Ed25519 custom Soroban account (__check_auth), used to prove live that this project's exact/upto schemes compose with custom __check_auth accounts, not just by architectural argument"
+repository = "https://github.com/mohamedFrihat/x402-stellar-facilitator"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+doctest = false
+
+[dependencies]
+soroban-sdk = "27.0.5"
+
+[dev-dependencies]
+soroban-sdk = { version = "27.0.5", features = ["testutils"] }
+
+[profile.release]
+opt-level = "z"
+overflow-checks = true
+debug = 0
+strip = "symbols"
+debug-assertions = false
+panic = "abort"
+codegen-units = 1
+lto = true

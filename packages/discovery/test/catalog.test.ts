@@ -357,6 +357,230 @@ describe("BazaarCatalog", () => {
     });
   });
 
+  describe("usage-based ranking (docs/bazaar-usage-ranking-design.md)", () => {
+    describe("recordUsage", () => {
+      it("increments both total_calls and unique_buyers for a first-time buyer above the threshold", async () => {
+        await catalog.upsert(httpResource(), CONFIRMED);
+        await catalog.recordUsage("https://api.example.com/weather", "GBUYER1", 1000n, 500n, { asOf: "2026-01-15" });
+
+        const stats = await catalog.usageStatsFor(["https://api.example.com/weather"], { asOf: "2026-01-15" });
+        expect(stats.get("https://api.example.com/weather")).toEqual({
+          avgUniqueBuyers30d: 1 / 30,
+          avgDailyCalls30d: 1 / 30,
+          activityRecency: "2026-01-15",
+        });
+      });
+
+      it("increments total_calls but not unique_buyers for a repeat buyer on the same day", async () => {
+        await catalog.upsert(httpResource(), CONFIRMED);
+        await catalog.recordUsage("https://api.example.com/weather", "GBUYER1", 1000n, 500n, { asOf: "2026-01-15" });
+        await catalog.recordUsage("https://api.example.com/weather", "GBUYER1", 1000n, 500n, { asOf: "2026-01-15" });
+
+        const stats = await catalog.usageStatsFor(["https://api.example.com/weather"], { asOf: "2026-01-15" });
+        expect(stats.get("https://api.example.com/weather")).toMatchObject({
+          avgUniqueBuyers30d: 1 / 30, // still just one distinct buyer
+          avgDailyCalls30d: 2 / 30, // but two calls
+        });
+      });
+
+      it("does not increment unique_buyers when the settled amount is below the Sybil-resistance threshold, but still increments total_calls", async () => {
+        await catalog.upsert(httpResource(), CONFIRMED);
+        await catalog.recordUsage("https://api.example.com/weather", "GCHEAPBUYER", 1n, 500n, { asOf: "2026-01-15" });
+
+        const stats = await catalog.usageStatsFor(["https://api.example.com/weather"], { asOf: "2026-01-15" });
+        expect(stats.get("https://api.example.com/weather")).toMatchObject({
+          avgUniqueBuyers30d: 0,
+          avgDailyCalls30d: 1 / 30,
+        });
+      });
+
+      it("credits a buyer once a later call crosses the threshold, even though the first call didn't", async () => {
+        await catalog.upsert(httpResource(), CONFIRMED);
+        await catalog.recordUsage("https://api.example.com/weather", "GBUYER1", 1n, 500n, { asOf: "2026-01-14" }); // below threshold
+        await catalog.recordUsage("https://api.example.com/weather", "GBUYER1", 1000n, 500n, { asOf: "2026-01-15" }); // above threshold, different day
+
+        const stats = await catalog.usageStatsFor(["https://api.example.com/weather"], { asOf: "2026-01-15" });
+        expect(stats.get("https://api.example.com/weather")).toMatchObject({
+          avgUniqueBuyers30d: 1 / 30, // credited on the second, qualifying day
+          avgDailyCalls30d: 2 / 30, // both calls still counted
+        });
+      });
+
+      it("counts distinct buyers on the same day toward unique_buyers, each above the threshold", async () => {
+        await catalog.upsert(httpResource(), CONFIRMED);
+        await catalog.recordUsage("https://api.example.com/weather", "GBUYER1", 1000n, 500n, { asOf: "2026-01-15" });
+        await catalog.recordUsage("https://api.example.com/weather", "GBUYER2", 1000n, 500n, { asOf: "2026-01-15" });
+        await catalog.recordUsage("https://api.example.com/weather", "GBUYER3", 1000n, 500n, { asOf: "2026-01-15" });
+
+        const stats = await catalog.usageStatsFor(["https://api.example.com/weather"], { asOf: "2026-01-15" });
+        expect(stats.get("https://api.example.com/weather")).toMatchObject({
+          avgUniqueBuyers30d: 3 / 30,
+          avgDailyCalls30d: 3 / 30,
+        });
+      });
+
+      it("rejects recording usage against a resource that was never cataloged (foreign key)", async () => {
+        await expect(
+          catalog.recordUsage("https://api.example.com/never-cataloged", "GBUYER1", 1000n, 500n),
+        ).rejects.toThrow();
+      });
+    });
+
+    describe("usageStatsFor", () => {
+      it("uses SUM(...)/30, not AVG(...): a resource active on only one of the last 30 days doesn't overstate its average", async () => {
+        await catalog.upsert(httpResource(), CONFIRMED);
+        // Only one active day in the window — AVG() would compute 5/1 = 5;
+        // SUM()/30 correctly treats the other 29 silent days as zero.
+        await catalog.recordUsage("https://api.example.com/weather", "GBUYER1", 1000n, 500n, { asOf: "2026-01-15" });
+        await catalog.recordUsage("https://api.example.com/weather", "GBUYER2", 1000n, 500n, { asOf: "2026-01-15" });
+        await catalog.recordUsage("https://api.example.com/weather", "GBUYER3", 1000n, 500n, { asOf: "2026-01-15" });
+        await catalog.recordUsage("https://api.example.com/weather", "GBUYER4", 1000n, 500n, { asOf: "2026-01-15" });
+        await catalog.recordUsage("https://api.example.com/weather", "GBUYER5", 1000n, 500n, { asOf: "2026-01-15" });
+
+        const stats = await catalog.usageStatsFor(["https://api.example.com/weather"], { asOf: "2026-01-15" });
+        expect(stats.get("https://api.example.com/weather")?.avgUniqueBuyers30d).toBe(5 / 30);
+        expect(stats.get("https://api.example.com/weather")?.avgUniqueBuyers30d).not.toBe(5); // what AVG() would have given
+      });
+
+      it("excludes activity outside the 30-day window", async () => {
+        await catalog.upsert(httpResource(), CONFIRMED);
+        await catalog.recordUsage("https://api.example.com/weather", "GBUYER1", 1000n, 500n, { asOf: "2025-01-01" }); // far outside the window
+        await catalog.recordUsage("https://api.example.com/weather", "GBUYER2", 1000n, 500n, { asOf: "2026-01-15" });
+
+        const stats = await catalog.usageStatsFor(["https://api.example.com/weather"], { asOf: "2026-01-15" });
+        expect(stats.get("https://api.example.com/weather")?.avgUniqueBuyers30d).toBe(1 / 30); // only the in-window call
+      });
+
+      it("reports activityRecency as the most recent active date", async () => {
+        await catalog.upsert(httpResource(), CONFIRMED);
+        await catalog.recordUsage("https://api.example.com/weather", "GBUYER1", 1000n, 500n, { asOf: "2026-01-10" });
+        await catalog.recordUsage("https://api.example.com/weather", "GBUYER2", 1000n, 500n, { asOf: "2026-01-15" });
+
+        const stats = await catalog.usageStatsFor(["https://api.example.com/weather"], { asOf: "2026-01-15" });
+        expect(stats.get("https://api.example.com/weather")?.activityRecency).toBe("2026-01-15");
+      });
+
+      it("omits a resource with no usage history from the returned map entirely", async () => {
+        await catalog.upsert(httpResource(), CONFIRMED);
+        const stats = await catalog.usageStatsFor(["https://api.example.com/weather"]);
+        expect(stats.has("https://api.example.com/weather")).toBe(false);
+      });
+
+      it("returns an empty map for an empty id list without querying", async () => {
+        expect(await catalog.usageStatsFor([])).toEqual(new Map());
+      });
+
+      it("never returns stats for a resource outside the requested candidate set", async () => {
+        await catalog.upsert(httpResource(), CONFIRMED);
+        await catalog.upsert(httpResource({ resourceUrl: "https://api.example.com/other" }), CONFIRMED);
+        await catalog.recordUsage("https://api.example.com/weather", "GBUYER1", 1000n, 500n, { asOf: "2026-01-15" });
+        await catalog.recordUsage("https://api.example.com/other", "GBUYER1", 1000n, 500n, { asOf: "2026-01-15" });
+
+        // Only asked about "weather" — "other" must not leak into the result
+        // even though it has real usage history too.
+        const stats = await catalog.usageStatsFor(["https://api.example.com/weather"], { asOf: "2026-01-15" });
+        expect([...stats.keys()]).toEqual(["https://api.example.com/weather"]);
+      });
+    });
+
+    describe("pruneStaleBuyers", () => {
+      it("prunes a buyer whose last activity is outside the 30-day window", async () => {
+        await catalog.upsert(httpResource(), CONFIRMED);
+        const longAgo = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+        await catalog.recordUsage("https://api.example.com/weather", "GSTALEBUYER", 1000n, 500n, { asOf: longAgo });
+
+        const pruned = await catalog.pruneStaleBuyers();
+        expect(pruned).toBe(1);
+      });
+
+      it("does not prune a buyer active within the last 30 days", async () => {
+        await catalog.upsert(httpResource(), CONFIRMED);
+        await catalog.recordUsage("https://api.example.com/weather", "GFRESHBUYER", 1000n, 500n); // asOf defaults to today
+
+        const pruned = await catalog.pruneStaleBuyers();
+        expect(pruned).toBe(0);
+      });
+
+      it("never touches resource_usage_daily — historical usage stats survive pruning", async () => {
+        await catalog.upsert(httpResource(), CONFIRMED);
+        const longAgo = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+        await catalog.recordUsage("https://api.example.com/weather", "GSTALEBUYER", 1000n, 500n, { asOf: longAgo });
+
+        await catalog.pruneStaleBuyers();
+
+        // resource_buyers was pruned, but resource_usage_daily (the retained
+        // history table) must still have that day's row — verified by
+        // windowing usageStatsFor's "asOf" back to include that old date.
+        const stats = await catalog.usageStatsFor(["https://api.example.com/weather"], { asOf: longAgo });
+        expect(stats.get("https://api.example.com/weather")?.avgUniqueBuyers30d).toBe(1 / 30);
+      });
+    });
+
+    describe("search() usage channel", () => {
+      it("reorders equally-relevant candidates by usage when the usage channel is enabled", async () => {
+        await catalog.upsert(
+          httpResource({ resourceUrl: "https://api.example.com/weather-popular", description: "weather forecast API" }),
+          CONFIRMED,
+        );
+        await catalog.upsert(
+          httpResource({ resourceUrl: "https://api.example.com/weather-unused", description: "weather forecast API" }),
+          CONFIRMED,
+        );
+        for (const buyer of ["GBUYER1", "GBUYER2", "GBUYER3"]) {
+          await catalog.recordUsage("https://api.example.com/weather-popular", buyer, 1000n, 500n);
+        }
+
+        const result = await catalog.search({ query: "weather forecast" }, { channels: ["lexical", "vector", "usage"] });
+        const ids = result.resources.map(r => r.resourceUrl);
+        expect(ids.indexOf("https://api.example.com/weather-popular")).toBeLessThan(
+          ids.indexOf("https://api.example.com/weather-unused"),
+        );
+      });
+
+      it("does not affect ranking when the usage channel is omitted (default, backward compatible)", async () => {
+        await catalog.upsert(
+          httpResource({ resourceUrl: "https://api.example.com/weather-a", description: "weather forecast API" }),
+          CONFIRMED,
+        );
+        await catalog.upsert(
+          httpResource({ resourceUrl: "https://api.example.com/weather-b", description: "weather forecast API" }),
+          CONFIRMED,
+        );
+        for (const buyer of ["GBUYER1", "GBUYER2", "GBUYER3"]) {
+          await catalog.recordUsage("https://api.example.com/weather-b", buyer, 1000n, 500n);
+        }
+
+        const withUsage = await catalog.search({ query: "weather forecast" }, { channels: ["lexical", "vector", "usage"] });
+        const withoutUsage = await catalog.search({ query: "weather forecast" }, { channels: ["lexical", "vector"] });
+        expect(withUsage.resources.map(r => r.resourceUrl)).not.toEqual(
+          withoutUsage.resources.map(r => r.resourceUrl),
+        );
+      });
+
+      it("never introduces a candidate the relevance channels didn't already select, even with heavy usage", async () => {
+        await catalog.upsert(
+          httpResource({ resourceUrl: "https://api.example.com/weather-match", description: "weather forecast API" }),
+          CONFIRMED,
+        );
+        await catalog.upsert(
+          httpResource({
+            resourceUrl: "https://api.example.com/irrelevant-but-popular",
+            description: "video transcoding pipeline",
+            serviceName: "Transcode Co", // overrides httpResource()'s default "Example Weather", which would otherwise leak a lexical "weather" match into this fixture
+            tags: ["video"],
+          }),
+          CONFIRMED,
+        );
+        for (const buyer of ["GBUYER1", "GBUYER2", "GBUYER3", "GBUYER4", "GBUYER5"]) {
+          await catalog.recordUsage("https://api.example.com/irrelevant-but-popular", buyer, 1000n, 500n);
+        }
+
+        const result = await catalog.search({ query: "weather forecast" }, { channels: ["lexical", "vector", "usage"] });
+        expect(result.resources.map(r => r.resourceUrl)).not.toContain("https://api.example.com/irrelevant-but-popular");
+      });
+    });
+  });
+
   describe("pending_catalog durable outbox (crash-safe cataloging)", () => {
     it("starts empty", async () => {
       expect(await catalog.listPending()).toEqual([]);

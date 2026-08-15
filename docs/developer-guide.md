@@ -261,6 +261,7 @@ in one call — the same cursor `GET /discovery/search` itself takes.
 | `DISCOVERY_DB_PATH` | No (`./data/discovery.db`) | PostgreSQL (PGlite) data directory for the Bazaar catalog |
 | `BILLING_DB_PATH` | No (`./data/billing.db`) | SQLite path for off-chain usage metering |
 | `BILLING_ADMIN_TOKEN` | No (open by default) | If set, `GET /billing/usage` requires it via `X-Billing-Admin-Token` |
+| `DISCOVERY_USAGE_RANKING_ENABLED` | No (`true`) | Set to `false` to disable the usage-based search-ranking channel instantly, no redeploy — see "Usage-based ranking" in `docs/architecture.md` |
 
 **`examples/seller-http`**
 
@@ -294,6 +295,21 @@ The spending cap (`AGENT_MAX_PAYMENT_AMOUNT`) is checked against the exact
 `402` response `call_resource` pays from, not a separate lookup — earlier
 versions checked a probe request instead, which a resource server could
 quote differently than the real payment.
+
+**Prompt-injection fencing.** `search_resources`/`list_resources` results and
+`call_resource`'s returned body all carry text a seller wrote, not this
+facilitator — a resource description, service name, tags, or the resource's
+own response content. Since MCP tool results typically flow straight into an
+agent's context, this server wraps every such field in an explicit,
+per-response fence (`⟦X402-UNTRUSTED-DATA:<nonce>:BEGIN⟧…⟦…:END⟧`) marking it
+as data, not instructions, with a matching notice in each tool's static
+description explaining the convention. The nonce is freshly random per tool
+call (so a seller can't pre-stage a forged boundary for a future response),
+and any text that already looks like a fence marker — for any nonce — is
+scrubbed out of untrusted input before wrapping, so a seller can't forge an
+early "END" and smuggle attacker-authored text past it. This raises the cost
+of indirect prompt injection; it isn't a claim that it's eliminated — see
+`packages/mcp-discovery-server/src/fence.ts`.
 
 > **Naming note:** avoid naming an env var `TOKEN` in an `npx`/`npm exec`
 > invocation — it's silently stripped from the child process's environment

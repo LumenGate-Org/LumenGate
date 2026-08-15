@@ -1,4 +1,4 @@
-export { BazaarCatalog, DEFAULT_PROVISIONAL_TTL_MS } from "./catalog.js";
+export { BazaarCatalog, DEFAULT_PROVISIONAL_TTL_MS, resourceId } from "./catalog.js";
 export { createDiscoveryRouter } from "./router.js";
 export {
   EXTENSION_RESPONSES_HEADER,
@@ -16,4 +16,5 @@ export type {
   SearchResult,
   UpsertOptions,
 } from "./types.js";
+export type { UsageStats } from "./catalog.js";
 export { embed, warmUpEmbeddings, EMBEDDING_DIMENSIONS } from "./embeddings.js";

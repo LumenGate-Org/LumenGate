@@ -8,10 +8,20 @@ import type { BazaarCatalog } from "./catalog.js";
  * facilitator's Express app.
  *
  * @param catalog - The backing Bazaar catalog
+ * @param options.searchChannels - Which `search()` channels this endpoint
+ *   uses (default: lexical + vector + usage). Exists so an operator can
+ *   disable the usage-ranking channel instantly (docs/bazaar-usage-ranking-design.md
+ *   §8's "toggleable off if it misbehaves") without an app-level code
+ *   change — see `PORT`-adjacent env vars in `packages/facilitator/src/server.ts`
+ *   for how this is actually wired to a runtime setting.
  * @returns An Express router exposing the two discovery endpoints
  */
-export function createDiscoveryRouter(catalog: BazaarCatalog): Router {
+export function createDiscoveryRouter(
+  catalog: BazaarCatalog,
+  options: { searchChannels?: ("lexical" | "vector" | "usage")[] } = {},
+): Router {
   const router = Router();
+  const searchChannels = options.searchChannels ?? ["lexical", "vector", "usage"];
 
   router.get("/resources", async (req, res) => {
     const { type, payTo, scheme, network, extensions, limit, offset } = req.query;
@@ -34,16 +44,19 @@ export function createDiscoveryRouter(catalog: BazaarCatalog): Router {
       res.status(400).json({ error: "query parameter is required" });
       return;
     }
-    const result = await catalog.search({
-      query: queryStr,
-      type: asString(type),
-      payTo: asString(payTo),
-      scheme: asString(scheme),
-      network: asString(network),
-      extensions: asString(extensions),
-      limit: asNumber(limit),
-      cursor: asString(cursor),
-    });
+    const result = await catalog.search(
+      {
+        query: queryStr,
+        type: asString(type),
+        payTo: asString(payTo),
+        scheme: asString(scheme),
+        network: asString(network),
+        extensions: asString(extensions),
+        limit: asNumber(limit),
+        cursor: asString(cursor),
+      },
+      { channels: searchChannels },
+    );
     res.json(result);
   });
 

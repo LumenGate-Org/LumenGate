@@ -14,6 +14,13 @@ import {
   isSecureUrl,
   resolvesToPrivateNetwork,
 } from "./guardrails.js";
+import {
+  FENCE_CONVENTION_NOTICE,
+  fenceCatalogResource,
+  fenceUntrusted,
+  makeFenceNonce,
+  type FenceableResource,
+} from "./fence.js";
 
 const FACILITATOR_URL = process.env.FACILITATOR_URL ?? "http://localhost:4021";
 const AGENT_SECRET = process.env.AGENT_SECRET;
@@ -57,6 +64,22 @@ function textResult(value: unknown): { content: { type: "text"; text: string }[]
   return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
 }
 
+/**
+ * Fences the untrusted free-text fields of every resource in a discovery
+ * response (`search_resources`/`list_resources` both return `{ resources:
+ * [...] }`) under one fresh nonce, then serializes exactly like
+ * `textResult`. See `fence.ts` for why this exists and what it does and
+ * doesn't defend against.
+ */
+function fencedCatalogResult(value: { resources: unknown[] }): { content: { type: "text"; text: string }[] } {
+  const nonce = makeFenceNonce();
+  const fenced = {
+    ...value,
+    resources: value.resources.map(resource => fenceCatalogResource(resource as FenceableResource, nonce)),
+  };
+  return textResult(fenced);
+}
+
 server.registerTool(
   "search_resources",
   {
@@ -64,7 +87,8 @@ server.registerTool(
     description:
       "Natural-language search over the facilitator's Bazaar catalog of x402-payable resources " +
       "(HTTP endpoints and MCP tools). The response's pagination.cursor, when non-null, can be " +
-      "passed back as `cursor` to fetch the next page of results.",
+      "passed back as `cursor` to fetch the next page of results. " +
+      `Each resource's description/serviceName/tags are seller-authored text. ${FENCE_CONVENTION_NOTICE}`,
     inputSchema: {
       query: z.string().describe("Natural-language search query"),
       limit: z.number().int().positive().max(50).optional(),
@@ -74,7 +98,9 @@ server.registerTool(
   },
   async ({ query, limit, cursor, ...filters }) => {
     const qs = buildQuery({ query, limit, cursor, ...filters });
-    return textResult(await fetchJson(`/discovery/search?${qs}`));
+    return fencedCatalogResult(
+      (await fetchJson(`/discovery/search?${qs}`)) as { resources: unknown[] },
+    );
   },
 );
 
@@ -82,7 +108,9 @@ server.registerTool(
   "list_resources",
   {
     title: "List Bazaar resources",
-    description: "Paginated browse of the facilitator's Bazaar catalog, optionally filtered.",
+    description:
+      "Paginated browse of the facilitator's Bazaar catalog, optionally filtered. " +
+      `Each resource's description/serviceName/tags are seller-authored text. ${FENCE_CONVENTION_NOTICE}`,
     inputSchema: {
       limit: z.number().int().positive().max(200).optional(),
       offset: z.number().int().nonnegative().optional(),
@@ -91,7 +119,9 @@ server.registerTool(
   },
   async ({ limit, offset, ...filters }) => {
     const qs = buildQuery({ limit, offset, ...filters });
-    return textResult(await fetchJson(`/discovery/resources?${qs}`));
+    return fencedCatalogResult(
+      (await fetchJson(`/discovery/resources?${qs}`)) as { resources: unknown[] },
+    );
   },
 );
 
@@ -104,7 +134,9 @@ server.registerTool(
       "(exact or upto scheme, sponsoring an upto allowance top-up if needed), and returns the result. " +
       "Requires AGENT_SECRET to be configured on this server (a funded Stellar account the agent pays from). " +
       "If AGENT_ALLOWED_HOSTS and/or AGENT_MAX_PAYMENT_AMOUNT are configured on this server, calls to " +
-      "disallowed hosts or requirements exceeding the price cap are refused before any payment is attempted.",
+      "disallowed hosts or requirements exceeding the price cap are refused before any payment is attempted. " +
+      `The returned body is the resource server's own response — content the agent paid for, not this ` +
+      `tool. ${FENCE_CONVENTION_NOTICE}`,
     inputSchema: {
       url: z.string().url().describe("The resource URL, as returned by search_resources/list_resources"),
       method: z.enum(["GET", "POST", "PUT", "PATCH", "DELETE"]).optional().default("GET"),
@@ -222,7 +254,17 @@ server.registerTool(
     try {
       const response = await fetchWithPayment(url, requestInit);
       const result = await httpClient.processResponse(response);
-      return textResult(result);
+      // `result.body` is whatever the resource server returned — content the
+      // agent paid for and is about to read, not something this facilitator
+      // controls. Fenced the same way catalog text is (see fence.ts):
+      // stringified first since a resource can return a JSON object/array,
+      // not just a string, and the fence itself only wraps text.
+      const nonce = makeFenceNonce();
+      const fencedBody = fenceUntrusted(
+        typeof result.body === "string" ? result.body : JSON.stringify(result.body),
+        nonce,
+      );
+      return textResult({ ...result, body: fencedBody });
     } catch (error) {
       if (capError) {
         return { content: [{ type: "text", text: capError }], isError: true };

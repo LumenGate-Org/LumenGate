@@ -35,6 +35,15 @@ import { BazaarCatalog } from "@x402-stellar/discovery";
  *    cataloging: provisional at receipt, confirmed at settlement" in
  *    docs/architecture.md.
  *
+ * 3. **Stale-buyer retention** (docs/bazaar-usage-ranking-design.md §6).
+ *    `resource_buyers` — the dedup structure usage-ranking's write path
+ *    uses to compute a correct per-day unique-buyer count — is pruned to a
+ *    30-day active window; unlike `resource_usage_daily` (kept indefinitely,
+ *    since that history is what lets a usage trend be tracked over time),
+ *    this table's only purpose is answering "who's active right now," so
+ *    unbounded growth here buys nothing. Reuses this same reconciliation
+ *    loop rather than a new scheduling mechanism.
+ *
  * Usage:
  *   pnpm indexer          # runs continuously, reconciling every INDEXER_INTERVAL_MS
  *   pnpm indexer:once      # single pass, for a cron-triggered deployment, then exits
@@ -86,6 +95,11 @@ async function runOnce(): Promise<void> {
   const evicted = await catalog.evictExpiredProvisional();
   if (evicted > 0) {
     console.info(`[indexer] evicted ${evicted} expired provisional (never-settled) catalog entries`);
+  }
+
+  const pruned = await catalog.pruneStaleBuyers();
+  if (pruned > 0) {
+    console.info(`[indexer] pruned ${pruned} stale resource_buyers rows (outside the 30-day active window)`);
   }
 }
 

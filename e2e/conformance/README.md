@@ -97,6 +97,21 @@ pnpm resource-benchmark:testnet   # simulateTransaction resource-cost comparison
 pnpm escrow-design-b:testnet      # raw-contract happy path + the live bearer-artifact security proof
 ```
 
+### Custom `__check_auth` account composability (RFP-literal requirement)
+
+```bash
+# Requires a deployed contracts/custom-account-demo instance, `init`-ed with
+# an owner key, and holding a balance of ASSET_TOKEN:
+export CUSTOM_ACCOUNT_CONTRACT=<deployed x402CustomAccountDemo address>
+export OWNER_SECRET=<the secret whose public key was init'd as the account's owner>
+export ASSET_TOKEN=<SEP-41 token address>
+export FACILITATOR_SECRET=$(stellar keys show facilitator)
+export SELLER_ADDRESS=$(stellar keys address seller)
+pnpm custom-account:testnet   # a custom __check_auth account settles a real exact
+                               # payment through the unmodified ExactStellarScheme
+                               # facilitator — no facilitator changes needed
+```
+
 ```bash
 # No env vars, no funded account, no prerequisites above — pure read-only
 # RPC calls (getHealth/getNetwork/getLatestLedger) against real Stellar
