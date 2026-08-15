@@ -25,7 +25,7 @@
     "@x402-stellar/discovery": "workspace:*",
     "better-sqlite3": "^11.8.1",
     "dotenv": "^16.4.7",
-    "express": "^4.21.2"
+    "express": "^5.2.1"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",

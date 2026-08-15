@@ -16,7 +16,7 @@
     "@x402-stellar/sdk": "workspace:*",
     "@x402-stellar/upto": "workspace:*",
     "dotenv": "^16.4.7",
-    "express": "^4.21.2"
+    "express": "^5.2.1"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",
