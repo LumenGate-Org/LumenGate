@@ -18,9 +18,9 @@
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^16.0.1",
-    "@x402/core": "^2.21.0",
-    "@x402/extensions": "^2.21.0",
-    "@x402/stellar": "^2.21.0",
+    "@x402/core": "^2.22.0",
+    "@x402/extensions": "^2.22.0",
+    "@x402/stellar": "^2.22.0",
     "@x402-stellar/upto": "workspace:*",
     "@x402-stellar/discovery": "workspace:*",
     "better-sqlite3": "^11.8.1",
@@ -31,7 +31,7 @@
     "@types/better-sqlite3": "^7.6.12",
     "@types/express": "^5.0.0",
     "typescript": "^5.7.3",
-    "tsx": "^4.21.0",
+    "tsx": "^4.23.12",
     "vitest": "^3.0.5"
   }
 }
