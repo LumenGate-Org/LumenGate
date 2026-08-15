@@ -74,6 +74,8 @@ first.
 - [Automatic cataloging: provisional at receipt, confirmed at settlement](#automatic-cataloging-provisional-at-receipt-confirmed-at-settlement)
 - [What's reused vs. original](#whats-reused-vs-original)
 - [Scope boundaries (deliberate, not oversold)](#scope-boundaries-deliberate-not-oversold)
+- [Decentralization](#decentralization)
+- [Privacy and data handling](#privacy-and-data-handling)
 
 ## Evidence at a glance
 
@@ -1242,3 +1244,82 @@ seller-side discovery/pricing helpers (`packages/sdk/src/seller.ts` —
   after years of assessed, wide adoption), each facilitator deploys and owns
   its own `x402UptoStellarSettlement` instance. Canonicalization is left as a
   future ecosystem question.
+
+## Decentralization
+
+**Settlement is non-custodial throughout, and that's a structural property of
+the design, not an operating discipline the facilitator promises to
+follow.** Funds move directly from buyer to seller (and, for managed
+`upto`, to the facilitator's fee share) in one atomic on-chain operation —
+the facilitator never holds a balance in transit at any point, for either
+`exact` or `upto`. This is enforced by Soroban itself, not by the
+facilitator's own honesty: every settlement requires the payer's own
+cryptographic authorization (a signed transaction for `exact`, a signed
+Soroban authorization entry for `upto`/`managed upto`), checked by the
+network at the protocol level. A facilitator that goes offline, has a bug,
+or turns actively malicious can **fail to settle** — it cannot **redirect**
+a payment, **exceed** what the buyer signed, or **forge** a settlement that
+never happened. This is the same property stated more narrowly earlier in
+this document (see "What's reused vs. original" and the `upto` design
+sections above); it's restated here as its own claim because "decentralized"
+and "non-custodial" are specific, checkable properties a reviewer should be
+able to verify independently, not a label to take on faith.
+
+**What this doesn't depend on**: no canonical, single shared settlement
+contract (each operator deploys and owns their own instance — see
+"No canonical shared settlement contract" just above); no dependency on
+this project's own hosted facilitator to keep functioning (Apache-2.0,
+self-hostable from a clean clone, per "What's reused vs. original"); no
+facilitator-controlled catalog trust (a Bazaar listing's `payTo` is bound
+to a real settled payment's recipient and independently re-verified against
+the resource's own live 402 challenge — see "Automatic cataloging" above —
+not something the facilitator can assert unilaterally).
+
+**What's honestly *not* decentralized, stated plainly rather than implied
+away**: the Bazaar catalog itself is single-facilitator-scoped by design —
+an operator running their own instance gets their own independent catalog,
+not a shared or federated one. Two operators running this same codebase
+don't automatically see each other's listings. That's a real, disclosed
+scope boundary (see "No production HA infrastructure" above for the
+related single-instance limitation), not a decentralization claim being
+quietly overstated.
+
+## Privacy and data handling
+
+**What the facilitator sees and stores, precisely:**
+
+- Payment payload data needed to `verify`/`settle` a request (the signed
+  transaction or authorization entry, the requirements it's checked
+  against) — all of which becomes public on the Stellar ledger the moment
+  settlement succeeds regardless of what this facilitator does with it.
+  Nothing here is additional tracking layered on top of what a public
+  blockchain already discloses about a settled transaction.
+- Discovery metadata a seller explicitly opts to declare (via the discovery
+  extension) — never collected without that opt-in, per "Automatic
+  cataloging" above.
+- Off-chain billing records (`packages/facilitator/src/billing.ts`):
+  per-seller (`payTo`) settlement counts and volume, for invoicing the
+  seller's own usage. This is seller-facing operational data, gated behind
+  `BILLING_ADMIN_TOKEN` (see `docs/developer-guide.md`), not a buyer
+  tracking mechanism — it's indexed by which seller got paid, not by who
+  paid them.
+- Operational metrics (`GET /metrics`): settlement counts by scheme/network,
+  signer balances, catalog size — aggregate operational signals, not
+  per-buyer records.
+
+**What it deliberately does not do**: no buyer identity is collected beyond
+what the buyer's own signature already discloses on a public ledger —
+Stellar addresses are pseudonymous, not anonymous, independent of anything
+this project does, and this facilitator adds no additional
+identity-resolution layer (no accounts, no API keys, no buyer-linked
+analytics). `packages/mcp-discovery-server`'s signer interface keeps signing
+keys client-side, in the buyer's own runtime, never transmitted to or held
+by the MCP server (see "Integrating as an agent (MCP)" in
+`docs/developer-guide.md`) — the server facilitates a payment flow, it
+never custodies the credential that authorizes one.
+
+The one place a *weaker* signal than raw identity is deliberately used for
+ranking is usage-based search ranking's `unique_buyers` count — itself
+scoped and rate-gated specifically to resist being used as a precise
+per-buyer tracking mechanism; see "Sybil resistance" in "Usage-based
+ranking" above for the exact mechanism and its acknowledged limits.

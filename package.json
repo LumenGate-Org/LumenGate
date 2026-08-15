@@ -12,7 +12,8 @@
     "build": "pnpm -r --if-present run build",
     "test": "pnpm -r --if-present run test",
     "lint": "eslint .",
-    "typecheck": "pnpm -r --if-present run typecheck"
+    "typecheck": "pnpm -r --if-present run typecheck",
+    "license-check": "node scripts/check-licenses.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
