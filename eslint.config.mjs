@@ -8,6 +8,7 @@
 // to typed linting is a reasonable next step, not done here.
 import js from "@eslint/js";
 import tseslint from "typescript-eslint";
+import globals from "globals";
 
 export default tseslint.config(
   {
@@ -22,6 +23,18 @@ export default tseslint.config(
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
+  {
+    // typescript-eslint's recommended config turns off core no-undef for
+    // .ts files (TypeScript's own checker already covers it), which is why
+    // this was never needed anywhere else in the repo — but plain .js/.mjs
+    // files (the repo-maintenance scripts under scripts/) aren't part of
+    // that TS-aware config and need Node's globals (console, process, ...)
+    // declared explicitly or every one of them flags as undefined.
+    files: ["**/*.js", "**/*.mjs", "**/*.cjs"],
+    languageOptions: {
+      globals: globals.node,
+    },
+  },
   {
     rules: {
       // Contract/protocol boundary code sometimes needs a deliberate

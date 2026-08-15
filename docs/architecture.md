@@ -81,7 +81,7 @@ first.
 
 | Claim | Measurement / proof | Full detail |
 |---|---|---|
-| Hybrid search finds paraphrased queries with **zero literal word overlap** against a purely lexical baseline | Recall@5 **1.000**, NDCG@5 **0.993** (hybrid) vs. **0.077** (lexical-only), 13 hand-labeled queries | "Search quality evaluation" below · `pnpm eval:search` |
+| Hybrid search finds paraphrased queries with **zero literal word overlap** against a purely lexical baseline | Recall@5 **1.000**, NDCG@5 **0.996** (hybrid) vs. **0.077** (lexical-only), 13 hand-labeled queries | "Search quality evaluation" below · `pnpm eval:search` |
 | Design B (`upto`, escrow-and-refund, this project's default) is cheaper on-chain than Design A (allowance-based) | **-25.3%** write bytes, **-31.5%** minimum resource fee — real `simulateTransaction` calls against both deployed contracts, re-run and reproduced while writing this document | "Benchmark methodology and full results" below · `pnpm resource-benchmark:testnet` |
 | Design B's escrow-pull cannot be invoked as a standalone bearer credential (the exact attack its own design critique raised) | Live testnet attack attempt, real signed witness, rejected on-chain: `Error(Auth, InvalidAction)` | "The `upto` settlement design" below · `CONFORMANCE_REPORT.md`, "Design B live proof" |
 | Managed `upto`'s facilitator fee splits **atomically, on-chain**, in the same transaction that settles the buyer's payment | Live testnet settlement with a nonzero `fee_bps`, verified balance deltas across buyer/seller/facilitator | "The three-tier billing model" below · `CONFORMANCE_REPORT.md` |
@@ -809,7 +809,7 @@ Live result, from a real run against the fixture above:
 
 | | Recall@5 | NDCG@5 |
 |---|---|---|
-| Hybrid (lexical + semantic, RRF-fused) — shipped default | 1.000 | 0.993 |
+| Hybrid (lexical + semantic, RRF-fused) — shipped default | 1.000 | 0.996 |
 | Lexical-only baseline (Postgres full-text/`ts_rank`, no vector channel) | 0.077 | 0.077 |
 
 The lexical-only baseline fails almost completely on this query set — not
