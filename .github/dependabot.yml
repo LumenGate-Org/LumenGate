@@ -1,0 +1,46 @@
+version: 2
+updates:
+  # Covers the whole pnpm workspace (root + every package under
+  # packages/, examples/, e2e/) from one entry — Dependabot resolves
+  # pnpm-lock.yaml and each workspace package.json automatically.
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    groups:
+      npm-minor-and-patch:
+        update-types: ["minor", "patch"]
+    open-pull-requests-limit: 10
+
+  # Each Soroban contract is its own crate with its own Cargo.lock, not a
+  # Cargo workspace — one entry per contract, not one shared entry.
+  - package-ecosystem: "cargo"
+    directory: "/contracts/upto-settlement-escrow"
+    schedule:
+      interval: "weekly"
+    groups:
+      cargo-minor-and-patch:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "cargo"
+    directory: "/contracts/upto-settlement"
+    schedule:
+      interval: "weekly"
+    groups:
+      cargo-minor-and-patch:
+        update-types: ["minor", "patch"]
+
+  - package-ecosystem: "cargo"
+    directory: "/contracts/custom-account-demo"
+    schedule:
+      interval: "weekly"
+    groups:
+      cargo-minor-and-patch:
+        update-types: ["minor", "patch"]
+
+  # Keeps the SHA-pinned actions in ci.yml current — Dependabot updates
+  # both the pin and the version comment together when it opens a PR.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

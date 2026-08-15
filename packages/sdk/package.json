@@ -1,6 +1,7 @@
 {
   "name": "@x402-stellar/sdk",
   "version": "0.1.0",
+  "private": true,
   "description": "Thin buyer/agent and seller helpers for the x402 Stellar facilitator (built on @x402/core, @x402/stellar, @x402/fetch, @x402-stellar/upto)",
   "license": "Apache-2.0",
   "type": "module",

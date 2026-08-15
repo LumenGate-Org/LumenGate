@@ -1,6 +1,7 @@
 {
   "name": "@x402-stellar/discovery",
   "version": "0.1.0",
+  "private": true,
   "description": "Bazaar discovery catalog (PostgreSQL/pgvector hybrid search) and HTTP endpoints for the x402 Stellar facilitator",
   "license": "Apache-2.0",
   "type": "module",

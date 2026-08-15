@@ -31,7 +31,6 @@
 import {
   createEd25519Signer,
   STELLAR_TESTNET_CAIP2,
-  getNetworkPassphrase,
   getRpcClient,
   type FacilitatorStellarSigner,
 } from "@x402/stellar";

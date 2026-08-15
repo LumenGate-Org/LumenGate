@@ -1,0 +1,18 @@
+# Code owners for this repository.
+#
+# GitHub requests a review from the matching owner(s) whenever a pull
+# request touches a path below. Replace `@LumenGate-Org` with the actual
+# maintainer handle(s) or a GitHub team (`@LumenGate-Org/team-name`) once
+# more than one person has merge access — a bare org handle is a
+# placeholder, not a real reviewer assignment.
+
+* @LumenGate-Org
+
+# Settlement-critical paths: worth a narrower, explicit line even while
+# there's only one owner, so this file already reflects the review
+# discipline these paths deserve once a second maintainer joins.
+/contracts/                        @LumenGate-Org
+/packages/stellar-upto/            @LumenGate-Org
+/packages/facilitator/src/billing.ts @LumenGate-Org
+/packages/facilitator/src/resource-ownership.ts @LumenGate-Org
+/specs/                            @LumenGate-Org

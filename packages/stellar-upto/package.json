@@ -1,6 +1,7 @@
 {
   "name": "@x402-stellar/upto",
   "version": "0.1.0",
+  "private": true,
   "description": "x402 `upto` scheme (client + facilitator) for Stellar, backed by the x402UptoStellarEscrowSettlement Soroban contract",
   "license": "Apache-2.0",
   "type": "module",

@@ -1,6 +1,7 @@
 {
   "name": "@x402-stellar/mcp-discovery-server",
   "version": "0.1.0",
+  "private": true,
   "description": "MCP server exposing Bazaar discovery (search/list) and paid resource calls to agents, for the x402 Stellar facilitator",
   "license": "Apache-2.0",
   "type": "module",

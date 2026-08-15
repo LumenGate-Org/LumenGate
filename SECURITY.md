@@ -5,7 +5,14 @@ security issues privately instead of opening a public issue.
 
 ## Reporting
 
-Send a concise report to the project maintainer with:
+Preferred: use GitHub's private vulnerability reporting for this repository
+(**Security** tab → **Report a vulnerability**), which opens a private
+advisory only the maintainers can see — no email round-trip, and the report
+stays out of the public issue tracker from the start. If that's not
+available to you, open a normal issue asking a maintainer to open a private
+channel, without including exploit details in that request.
+
+Include in the report:
 
 - Affected package, contract, endpoint, or script
 - Impact and exploitation conditions

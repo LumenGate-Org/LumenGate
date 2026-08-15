@@ -270,7 +270,7 @@ async function main(): Promise<void> {
     source: facilitatorSigner.address,
   });
 
-  let misuseRejected = false;
+  let misuseRejected: boolean;
   let misuseReason = "";
   try {
     const misuseAccount = await server.getAccount(facilitatorSigner.address);

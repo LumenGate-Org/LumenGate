@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Keypair, nativeToScVal, xdr } from "@stellar/stellar-sdk";
+import { Keypair, nativeToScVal } from "@stellar/stellar-sdk";
 import { buildSettleScArgs, buildWitnessScArgs } from "../src/witness.js";
 import { decodeWitnessEntry } from "../src/facilitator/decode.js";
 import type { UptoWitnessCommitment } from "../src/types.js";

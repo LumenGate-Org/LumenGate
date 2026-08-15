@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Account, Keypair, TransactionBuilder, xdr, BASE_FEE } from "@stellar/stellar-sdk";
+import { Account, Keypair, TransactionBuilder, BASE_FEE } from "@stellar/stellar-sdk";
 import { STELLAR_TESTNET_CAIP2, getNetworkPassphrase } from "@x402/stellar";
 import { buildSettleOperation, UptoStellarScheme } from "../src/facilitator/scheme.js";
 import type { UptoWitnessCommitment } from "../src/types.js";
