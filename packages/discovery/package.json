@@ -10,7 +10,8 @@
     "build": "tsc -p tsconfig.json",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "eval:search": "tsx eval/evaluate.ts"
+    "eval:search": "tsx eval/evaluate.ts",
+    "eval:usage-ranking": "tsx eval/evaluate-usage-ranking.ts"
   },
   "dependencies": {
     "@electric-sql/pglite": "^0.5.4",

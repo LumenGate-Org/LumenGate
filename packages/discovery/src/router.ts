@@ -9,16 +9,21 @@ import type { BazaarCatalog } from "./catalog.js";
  *
  * @param catalog - The backing Bazaar catalog
  * @param options.searchChannels - Which `search()` channels this endpoint
- *   uses (default: lexical + vector + usage). Exists so an operator can
- *   disable the usage-ranking channel instantly (docs/bazaar-usage-ranking-design.md
- *   §8's "toggleable off if it misbehaves") without an app-level code
- *   change — see `PORT`-adjacent env vars in `packages/facilitator/src/server.ts`
- *   for how this is actually wired to a runtime setting.
+ *   uses (default: lexical + vector + usage, **not** l2rerank — see below).
+ *   Exists so an operator can disable any of these instantly
+ *   (docs/bazaar-usage-ranking-design.md §8's "toggleable off if it
+ *   misbehaves") without an app-level code change — see the
+ *   `DISCOVERY_*_ENABLED` env vars in `packages/facilitator/src/server.ts`
+ *   for how this is actually wired to a runtime setting. `l2rerank` is
+ *   off by default here (unlike `usage`): it's meaningfully more
+ *   expensive — measured ~800ms for 50 candidates on commodity hardware,
+ *   see §2.1 — so a zero-config deployment shouldn't pay that cost on
+ *   every search without an explicit opt-in.
  * @returns An Express router exposing the two discovery endpoints
  */
 export function createDiscoveryRouter(
   catalog: BazaarCatalog,
-  options: { searchChannels?: ("lexical" | "vector" | "usage")[] } = {},
+  options: { searchChannels?: ("lexical" | "vector" | "usage" | "l2rerank")[] } = {},
 ): Router {
   const router = Router();
   const searchChannels = options.searchChannels ?? ["lexical", "vector", "usage"];

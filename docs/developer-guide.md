@@ -261,7 +261,8 @@ in one call — the same cursor `GET /discovery/search` itself takes.
 | `DISCOVERY_DB_PATH` | No (`./data/discovery.db`) | PostgreSQL (PGlite) data directory for the Bazaar catalog |
 | `BILLING_DB_PATH` | No (`./data/billing.db`) | SQLite path for off-chain usage metering |
 | `BILLING_ADMIN_TOKEN` | No (open by default) | If set, `GET /billing/usage` requires it via `X-Billing-Admin-Token` |
-| `DISCOVERY_USAGE_RANKING_ENABLED` | No (`true`) | Set to `false` to disable the usage-based search-ranking channel instantly, no redeploy — see "Usage-based ranking" in `docs/architecture.md` |
+| `DISCOVERY_USAGE_RANKING_ENABLED` | No (`false`) | Set to `true` to enable the usage-based search-ranking channel — off by default: `eval/evaluate-usage-ranking.ts` measured a real relevance-quality tradeoff (Recall@1 0.949 relevance-only vs. 0.692 under adversarial synthetic usage), and this isn't an RFP-required feature, so the safer configuration ships by default; see "Usage-based ranking" in `docs/architecture.md` |
+| `DISCOVERY_L2_RERANK_ENABLED` | No (`false`) | Set to `true` to enable L2 semantic reranking (a real cross-encoder over the top 50 candidates) — off by default since it measures ~800ms added latency for 50 candidates; see "Usage-based ranking" in `docs/architecture.md` |
 
 **`examples/seller-http`**
 

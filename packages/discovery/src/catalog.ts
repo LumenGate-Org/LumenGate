@@ -1,6 +1,7 @@
 import { PGlite } from "@electric-sql/pglite";
 import { vector } from "@electric-sql/pglite-pgvector";
 import { embed, EMBEDDING_DIMENSIONS } from "./embeddings.js";
+import { rerank } from "./reranker.js";
 import type {
   CatalogResource,
   DiscoveredResourceInput,
@@ -38,6 +39,14 @@ const RRF_K = 60;
 // cosine similarity, clearly unrelated pairs scored ~-0.05 to 0.04. 0.15
 // sits well below real matches and well above noise.
 const MIN_SEMANTIC_SIMILARITY = 0.15;
+// L2 semantic reranking (docs/bazaar-usage-ranking-design.md §2.1) only
+// re-scores this many top first-stage candidates. Fixed at Azure AI
+// Search's own documented hard limit for its L2 semantic ranking ("Even if
+// results include more than 50 results, only the top 50 results progress
+// to semantic ranking") — adopted verbatim rather than re-deriving a
+// cost/quality tradeoff a production system at far larger scale already
+// settled.
+const L2_RERANK_TOP_K = 50;
 // A provisional (verify-time, not-yet-settled) catalog entry is evicted if
 // never confirmed within this window. Generous relative to a typical
 // verify->settle round trip (seconds) to tolerate real-world latency and
@@ -599,35 +608,41 @@ export class BazaarCatalog {
    * class docs above for the full rationale and "Search quality
    * evaluation" in docs/architecture.md for how this is measured.
    *
-   * A third, optional `"usage"` channel (docs/bazaar-usage-ranking-design.md
-   * §2.2) runs as a *second* Reciprocal Rank Fusion pass on top of the
-   * first: it never retrieves independently or introduces a candidate the
-   * lexical/vector channels didn't already select — it only reorders within
-   * that set, by `(avgUniqueBuyers30d, avgDailyCalls30d, activityRecency)`
-   * descending, folded in via the exact same RRF loop shape as the first
-   * pass. **Scope note**: the design document also specifies an L2
-   * semantic-reranking stage (§2.1) that would sit between the first RRF
-   * pass and this one, replacing "the lexical/vector-fused order" with "the
-   * L2-reranked order" as what usage reorders. That stage is not
-   * implemented here — a real cross-encoder reranker is a separate,
-   * heavier addition (a new model dependency, meaningful added latency; see
-   * §2.1's own measured numbers) deliberately left for its own pass, not
-   * bundled into this one. Usage therefore reorders the first-stage
-   * RRF-fused (lexical+vector) order directly, consistent with §8's
-   * design intent that usage and L2 reranking are independently toggleable
-   * — this ships the one without waiting on the other.
+   * Two further, optional stages layer on top of that first-stage relevance
+   * order, both from docs/bazaar-usage-ranking-design.md and both
+   * independently toggleable (§8):
+   *
+   * - **`"l2rerank"`** (§2.1): a genuine second-stage cross-encoder
+   *   (`reranker.ts`) re-scores the top `L2_RERANK_TOP_K` first-stage
+   *   candidates against the query, producing a **new, authoritative**
+   *   relevance order for just that subset — not blended with the
+   *   first-stage RRF scores, since the whole point is an independently
+   *   computed judgment, not a recombination of one the first stage
+   *   already had. Candidates beyond the top-K keep their first-stage
+   *   relative order, trailing behind the reranked ones. Meaningfully more
+   *   expensive than everything else in this method (measured ~800ms for
+   *   50 candidates on commodity hardware — see §2.1) — off by default,
+   *   opt in via `options.channels`.
+   * - **`"usage"`** (§2.2): a *second* Reciprocal Rank Fusion pass, fusing
+   *   whatever the current relevance order is at this point (the
+   *   L2-reranked order if that stage ran, otherwise the first-stage
+   *   lexical+vector order) with a usage-popularity order — never
+   *   retrieves independently or introduces a candidate the earlier stages
+   *   didn't already select, only reorders within that set, by
+   *   `(avgUniqueBuyers30d, avgDailyCalls30d, activityRecency)` descending.
    *
    * @param filters - Query text plus Bazaar's standard filters
    * @param options - `channels` restricts retrieval to a subset of channels
-   *   (default: lexical + vector, matching pre-usage-ranking behavior — the
-   *   HTTP endpoint opts into `"usage"` explicitly via `createDiscoveryRouter`'s
-   *   own option, so it stays instantly toggleable without an app-level code
-   *   change); `eval/evaluate.ts` also uses this to report a lexical-only
-   *   baseline alongside the real hybrid result.
+   *   (default: lexical + vector only, matching pre-ranking-work behavior —
+   *   the HTTP endpoint opts into `"usage"` and optionally `"l2rerank"`
+   *   explicitly via `createDiscoveryRouter`'s own option, so both stay
+   *   instantly toggleable without an app-level code change);
+   *   `eval/evaluate.ts` also uses this to report a lexical-only baseline
+   *   alongside the real hybrid result.
    */
   async search(
     filters: SearchFilters,
-    options: { channels?: ("lexical" | "vector" | "usage")[] } = {},
+    options: { channels?: ("lexical" | "vector" | "usage" | "l2rerank")[] } = {},
   ): Promise<SearchResult> {
     await this.ready;
     const channels = options.channels ?? ["lexical", "vector"];
@@ -686,23 +701,44 @@ export class BazaarCatalog {
       fusedScores.set(id, (fusedScores.get(id) ?? 0) + 1 / (RRF_K + rank));
     }
 
-    // --- Usage as a second RRF pass (§2.2): reorders only within the
-    // candidate set the two channels above already selected — `candidateIds`
-    // is exactly `fusedScores`' current key set, so `usageStatsFor` can
-    // never hand back a ranking for a resource that isn't already a
-    // candidate, and this loop can never introduce one. ---
+    // --- L2 semantic reranking (§2.1): for the top-K first-stage
+    // candidates only, REPLACES (not blends with) their score above with a
+    // fresh one derived purely from the cross-encoder's own rank —
+    // "producing the authoritative relevance order for those candidates,"
+    // literally, not a recombination of the first-stage lexical/vector
+    // score they walked in with. Candidates outside the top-K are left
+    // exactly as the first-stage RRF scored them. ---
+    if (channels.includes("l2rerank") && fusedScores.size > 0) {
+      await this.applyL2Rerank(trimmedQuery, fusedScores);
+    }
+
+    // --- Usage as a second RRF pass (§2.2): added directly on top of
+    // whatever's in `fusedScores` at this point (first-stage lexical+vector,
+    // with the top-K possibly L2-replaced) — the same "just another
+    // RRF channel" shape the first pass already uses, deliberately not
+    // collapsed into a single win-or-lose relevance rank first. That
+    // distinction matters empirically, not just stylistically: a
+    // candidate two first-stage channels agree on already carries roughly
+    // double the score of a single-channel match, and preserving that
+    // margin is what keeps usage — itself only ever one more bounded
+    // channel — from casually overturning a strong relevance consensus.
+    // An earlier version of this method collapsed first-stage scores into
+    // one relevance rank before fusing usage, giving usage equal footing
+    // with the *entire* first-stage result regardless of how many channels
+    // had agreed on it; `eval/evaluate-usage-ranking.ts` caught this
+    // directly — Recall@1 dropped from 0.949 to 0.615 against synthetic,
+    // query-uncorrelated usage data, a real regression, not a rounding
+    // difference. Reverted to this additive-channel shape and re-verified:
+    // see that eval script's own output for the current numbers. ---
     if (channels.includes("usage") && fusedScores.size > 0) {
       const candidateIds = [...fusedScores.keys()];
       const usageStats = await this.usageStatsFor(candidateIds);
-      if (usageStats.size > 0) {
-        const usageOrder = candidateIds
-          .filter(id => usageStats.has(id))
-          .sort((a, b) => compareUsage(usageStats.get(a)!, usageStats.get(b)!));
-        usageOrder.forEach((id, i) => {
-          const rank = i + 1;
-          fusedScores.set(id, (fusedScores.get(id) ?? 0) + 1 / (RRF_K + rank));
-        });
-      }
+      const usageOrder = candidateIds
+        .filter(id => usageStats.has(id))
+        .sort((a, b) => compareUsage(usageStats.get(a)!, usageStats.get(b)!));
+      usageOrder.forEach((id, i) => {
+        fusedScores.set(id, (fusedScores.get(id) ?? 0) + 1 / (RRF_K + i + 1));
+      });
     }
 
     const fusedOrder = [...fusedScores.entries()].sort((a, b) => b[1] - a[1]).map(([id]) => id);
@@ -726,6 +762,60 @@ export class BazaarCatalog {
       partialResults,
       pagination: { limit, cursor: nextCursor },
     };
+  }
+
+  /**
+   * §2.1's L2 semantic reranking: re-scores the top `L2_RERANK_TOP_K`
+   * candidates currently in `fusedScores` (by their existing score,
+   * descending) against `query` via a real cross-encoder (`reranker.ts`),
+   * then **replaces** each one's entry in `fusedScores` with a fresh score
+   * derived purely from its new cross-encoder rank — mutates the map
+   * in place rather than returning a new structure, since "replace, don't
+   * blend" only makes sense as an in-place overwrite of the same score
+   * space usage's RRF pass reads from afterward. Candidates outside the
+   * top-K are left with their original first-stage score, untouched.
+   *
+   * The text fed to the reranker is the same combined searchable text the
+   * lexical/vector channels already index (`buildSearchableText`), not a
+   * new text-assembly pipeline — matching the design's "candidate text
+   * should be the resource's existing text, not arbitrary unbounded
+   * content."
+   */
+  private async applyL2Rerank(query: string, fusedScores: Map<string, number>): Promise<void> {
+    const order = [...fusedScores.entries()].sort((a, b) => b[1] - a[1]).map(([id]) => id);
+    const topK = order.slice(0, L2_RERANK_TOP_K);
+    if (topK.length === 0) return;
+
+    const placeholders = topK.map((_, i) => `$${i + 1}`).join(", ");
+    const rowsResult = await this.db.query<{
+      id: string;
+      resource_url: string;
+      description: string | null;
+      service_name: string | null;
+      tags: string | null;
+      type: "http" | "mcp";
+      tool_name: string | null;
+    }>(
+      `SELECT id, resource_url, description, service_name, tags, type, tool_name
+       FROM resources WHERE id IN (${placeholders})`,
+      topK,
+    );
+
+    const candidates = rowsResult.rows.map(row => ({
+      id: row.id,
+      text: buildSearchableText({
+        resourceUrl: row.resource_url,
+        description: row.description ?? undefined,
+        serviceName: row.service_name ?? undefined,
+        tags: row.tags ? (JSON.parse(row.tags) as string[]) : undefined,
+        type: row.type,
+        toolName: row.tool_name ?? undefined,
+      }),
+    }));
+
+    const scores = await rerank(query, candidates);
+    const rerankedTopK = [...topK].sort((a, b) => (scores.get(b) ?? -Infinity) - (scores.get(a) ?? -Infinity));
+    rerankedTopK.forEach((id, i) => fusedScores.set(id, 1 / (RRF_K + i + 1)));
   }
 
   async close(): Promise<void> {

@@ -1,5 +1,98 @@
 # Architecture
 
+## Overview
+
+x402 is an HTTP-native payment protocol: a resource server responds to an
+unpaid request with `402 Payment Required` and a structured description of
+what it costs (`PaymentRequirements` — scheme, network, asset, amount or
+ceiling, `payTo`); a client attaches a signed payment payload and
+resubmits; a **facilitator** — a third party neither the client nor the
+resource server needs to trust beyond what it cryptographically proves —
+verifies that payload and settles it on-chain. Neither side needs to run
+blockchain infrastructure itself. This project is a facilitator for
+Stellar, plus **Bazaar**, a discovery layer so a buyer or an autonomous
+agent can find a payable resource by natural-language search instead of
+already knowing its URL.
+
+Three settlement schemes recur throughout this document:
+
+- **`exact`** — a fixed price, paid in full, in one transaction. Reused
+  unmodified from the upstream `@x402/stellar` package (see "What's reused
+  vs. original" below) — this project adds no code to this path at all.
+- **`upto`** — a *ceiling*, not a fixed price: the buyer authorizes a
+  maximum up front, and the facilitator settles later for whatever the
+  resource actually metered, once that's known (e.g. per-token LLM
+  inference, where the exact cost isn't known until the response is
+  generated). Stellar has no equivalent of EVM's Permit2 for this
+  sign-a-ceiling/settle-a-lesser-amount pattern, so this project designed
+  and built a dedicated settlement contract from scratch — see "Why `upto`
+  needed a new contract on Stellar" below.
+- **`managed upto`** — this project's own addition on top of `upto`: the
+  same settlement contract also computes and pays a facilitator fee,
+  atomically, in the same on-chain transaction that settles the buyer's
+  payment — no off-chain invoicing, no trust required that the facilitator
+  counted correctly. See "The three-tier billing model" below.
+
+`POST /verify` checks that a payment payload is well-formed and properly
+authorized, without moving any funds; `POST /settle` actually submits the
+transaction and moves them. Both are plain, unauthenticated HTTP endpoints
+any x402-compliant resource server can call — see "Components" immediately
+below for where they sit relative to everything else, and "`/verify` and
+`/settle` are intentionally unauthenticated" further down for why that's
+correct, not an oversight.
+
+**How to read the rest of this document.** Components and the end-to-end
+request flow, right below, are the fastest way to see how the pieces fit
+together. After that: the billing model across all three tiers; why `upto`
+needed new Soroban engineering and how that compares to EVM/Solana's own
+`upto` designs; Stellar-specific operational considerations the protocol
+requirements call out explicitly; the two `upto` contract designs
+benchmarked head-to-head, with full methodology; Bazaar's hybrid search
+architecture and its own measured quality; usage-based search ranking;
+automatic cataloging and its integrity guarantees; and, at the end, an
+explicit accounting of what's reused vs. original and this prototype's
+deliberate scope boundaries. Every non-trivial technical claim in this
+document is backed by a unit/integration test, a live testnet transaction,
+or a measured benchmark, cited inline at the point of the claim — the table
+immediately below is a single-page index of the ones most worth checking
+first.
+
+**Contents**
+
+- [Evidence at a glance](#evidence-at-a-glance)
+- [Components](#components)
+- [The three-tier billing model](#the-three-tier-billing-model)
+  - [Technical assessment: can the off-chain fixed/percentage/combined model extend on-chain?](#technical-assessment-can-the-off-chain-fixedpercentagecombined-model-extend-on-chain)
+- [Why `upto` needed a new contract on Stellar](#why-upto-needed-a-new-contract-on-stellar)
+- [How this compares to `upto` on EVM and Solana](#how-this-compares-to-upto-on-evm-and-solana)
+- [Stellar-specific operational considerations](#stellar-specific-operational-considerations)
+- [The `upto` settlement design: escrow-and-refund (primary), allowance-based (alternative)](#the-upto-settlement-design-escrow-and-refund-primary-allowance-based-alternative)
+  - [Benchmark methodology and full results](#benchmark-methodology-and-full-results)
+- [Hybrid search architecture](#hybrid-search-architecture)
+  - [Search quality evaluation](#search-quality-evaluation)
+- [Usage-based ranking: L2 semantic reranking and a second RRF pass on top of relevance](#usage-based-ranking-l2-semantic-reranking-and-a-second-rrf-pass-on-top-of-relevance)
+- [Automatic cataloging: provisional at receipt, confirmed at settlement](#automatic-cataloging-provisional-at-receipt-confirmed-at-settlement)
+- [What's reused vs. original](#whats-reused-vs-original)
+- [Scope boundaries (deliberate, not oversold)](#scope-boundaries-deliberate-not-oversold)
+
+## Evidence at a glance
+
+| Claim | Measurement / proof | Full detail |
+|---|---|---|
+| Hybrid search finds paraphrased queries with **zero literal word overlap** against a purely lexical baseline | Recall@5 **1.000**, NDCG@5 **0.993** (hybrid) vs. **0.077** (lexical-only), 13 hand-labeled queries | "Search quality evaluation" below · `pnpm eval:search` |
+| Design B (`upto`, escrow-and-refund, this project's default) is cheaper on-chain than Design A (allowance-based) | **-25.3%** write bytes, **-31.5%** minimum resource fee — real `simulateTransaction` calls against both deployed contracts, re-run and reproduced while writing this document | "Benchmark methodology and full results" below · `pnpm resource-benchmark:testnet` |
+| Design B's escrow-pull cannot be invoked as a standalone bearer credential (the exact attack its own design critique raised) | Live testnet attack attempt, real signed witness, rejected on-chain: `Error(Auth, InvalidAction)` | "The `upto` settlement design" below · `CONFORMANCE_REPORT.md`, "Design B live proof" |
+| Managed `upto`'s facilitator fee splits **atomically, on-chain**, in the same transaction that settles the buyer's payment | Live testnet settlement with a nonzero `fee_bps`, verified balance deltas across buyer/seller/facilitator | "The three-tier billing model" below · `CONFORMANCE_REPORT.md` |
+| Custom Soroban `__check_auth` accounts (the literal "smart account spending policies" requirement) compose with this facilitator **unmodified** | Live testnet `exact` settlement paid from a deployed custom-account contract, through the unmodified upstream `ExactStellarScheme` | "Composition with Stellar smart account spending policies" below · `pnpm custom-account:testnet` |
+| Channel accounts decouple settlement submission from the facilitator's own signing identity, for concurrent-load scaling | Live testnet run: channel account's sequence number advanced; facilitator signer's own sequence number stayed untouched — confirmed against Horizon | "Sequence-number bottlenecks under load" below |
+| Automatic cataloging survives a process crash mid-write | Unit test forces a crash mid-write and confirms recovery; a real run of the standalone indexer process reconciles a manually-enqueued pending entry end to end, not just in a mock | "Crash-safe settlement confirmation" below |
+| Usage-based search ranking never promotes a candidate the relevance stages didn't already select, and its real-world tradeoff is measured, not assumed | Dedicated containment test, plus a harness-level eval with synthetic usage data — which caught and led to fixing a real implementation regression before it shipped | "Usage-based ranking" below · `pnpm eval:usage-ranking` |
+| Full automated test suite | **300 tests passing** — 265 TypeScript across 5 packages (`discovery`, `facilitator`, `mcp-discovery-server`, `sdk`, `stellar-upto`), 35 Rust across 3 Soroban contracts — plus 10 live testnet/pubnet conformance scripts exercising real transactions | Per-package `pnpm test` · `e2e/conformance/CONFORMANCE_REPORT.md` |
+
+Every row links to the section (or the conformance report) with the full
+methodology behind it — this table is an index, not a substitute for
+reading the section it points to.
+
 ## Components
 
 ```
@@ -38,6 +131,30 @@
 over HTTP; everything else is either a library it's built from
 (`@x402/core`, `@x402/stellar`, `@x402/extensions`, `stellar-upto`) or a
 consumer of its `/discovery` and `/verify`/`/settle` endpoints.
+
+**Request flow, end to end.** A buyer (or an agent acting on its behalf)
+either already knows a resource's URL, or finds one via Bazaar first
+(`GET /discovery/search`, a natural-language query served entirely by
+`packages/discovery` — no payment involved to search). Calling the resource
+directly returns `402 Payment Required` with structured
+`PaymentRequirements`. The buyer's client (`packages/sdk`, or the MCP
+server's `call_resource` tool) builds and signs a payment payload against
+those exact requirements — a signed transaction for `exact`, a scoped
+Soroban authorization entry for `upto`/`managed upto` (see "Why `upto`
+needed a new contract on Stellar" below for why the two differ
+structurally) — and resubmits the original request with that payload
+attached. The resource server calls this facilitator's `POST /verify` to
+confirm the payload is well-formed and properly authorized *before* serving
+the resource (no funds move yet), then, once it has served the response,
+`POST /settle` to actually submit the transaction and move funds
+on-chain. A successful settlement triggers two further, asynchronous
+facilitator-side effects the buyer never has to wait on directly: the
+resource gets cataloged into Bazaar (see "Automatic cataloging" below) and,
+for `exact`/standard `upto`, an off-chain billing record is written (see
+"The three-tier billing model" immediately below). The facilitator itself
+holds no funds in transit at any point — every settlement moves value
+directly from buyer to seller (and, for managed `upto`, to the facilitator's
+fee share) in one atomic on-chain operation; there is no custodial step.
 
 ## The three-tier billing model
 
@@ -713,32 +830,60 @@ benchmark growing as real usage surfaces queries the current fixture
 doesn't cover — is this project's answer to "how will you evaluate result
 quality over time," not a one-time number.
 
-## Usage-based ranking: a second RRF pass on top of relevance
+## Usage-based ranking: L2 semantic reranking and a second RRF pass on top of relevance
 
 Relevance alone (the hybrid search above) has no concept of how often a
 resource is actually used — a resource with zero real-world adoption and
 one with heavy, repeat, paying usage rank identically if they're equally
 relevant to a query. Designed in full first (`docs/bazaar-usage-ranking-design.md`,
-including a Word-doc version for external review) and then implemented as
-designed, with one disclosed scope cut: the design also specifies a
-cross-encoder L2 semantic-reranking stage (a genuine second-stage reranker,
-the same shape as Azure AI Search's L2 semantic ranking) that would sit
-between first-stage retrieval and usage-ranking — that stage was not built
-(a new model dependency and real added latency, deliberately left
-independently toggleable per the design's own §8), so usage reorders the
-first-stage lexical+vector RRF-fused order directly.
+including a Word-doc version for external review) and then implemented in
+two passes — usage-ranking first, L2 semantic reranking after, once the
+usage work's own eval harness existed to validate against.
 
-**Mechanism**: usage is folded in via the *exact same* Reciprocal Rank
-Fusion mechanism the hybrid search above already uses, applied a second
-time — not a multiplicative boost or a new weighting scheme needing its own
-constants. Candidates already selected by the lexical/vector channels are
-re-ranked by `(avgUniqueBuyers30d, avgDailyCalls30d, activityRecency)`
-descending and fused back in with the same `1 / (RRF_K + rank)` loop shape.
-This is deliberately scope-limited: it can only reorder within the
-candidate set relevance already selected, never introduce a candidate the
-relevance stages didn't already find — verified directly by a dedicated
-test (`catalog.test.ts`, "never introduces a candidate the relevance
-channels didn't already select, even with heavy usage").
+**L2 semantic reranking** (`packages/discovery/src/reranker.ts`): a genuine
+second-stage cross-encoder, the same shape as Azure AI Search's L2 semantic
+ranking — `Xenova/ms-marco-MiniLM-L-6-v2` via `AutoTokenizer` +
+`AutoModelForSequenceClassification`, batched, re-scoring the top 50
+first-stage candidates (Azure's own documented hard limit, adopted
+verbatim) and **replacing** their score with an independently-computed
+judgment, never blended with the first-stage lexical/vector score it
+replaces. A real, adversarial test proves this does genuine work, not just
+plumbing: a resource containing both query words literally but describing
+an unrelated board game outranks the actual matching resource under plain
+hybrid search (the literal match wins); enabling `l2rerank` correctly
+promotes the genuine match to first (`catalog.test.ts`). Measured ~800ms
+for 50 candidates on commodity hardware — meaningful enough that it's off
+by default (`DISCOVERY_L2_RERANK_ENABLED`), unlike usage.
+
+**Usage as a second RRF pass**: folded in via the *exact same* Reciprocal
+Rank Fusion mechanism the hybrid search above already uses, applied a
+second time — not a multiplicative boost or a new weighting scheme needing
+its own constants. Candidates already selected by the lexical/vector
+channels (and, when enabled, re-scored by L2 reranking) are re-ranked by
+`(avgUniqueBuyers30d, avgDailyCalls30d, activityRecency)` descending and
+fused back in with the same `1 / (RRF_K + rank)` loop shape, added directly
+into the same running score map the earlier stages populate — deliberately
+*not* collapsed into a single relevance rank first, since a candidate two
+first-stage channels agree on should keep roughly double the score of a
+single-channel match, not get flattened to equal footing with a
+usage-boosted competitor. This is deliberately scope-limited: it can only
+reorder within the candidate set relevance already selected, never
+introduce a candidate the relevance stages didn't already find — verified
+directly by a dedicated test (`catalog.test.ts`, "never introduces a
+candidate the relevance channels didn't already select, even with heavy
+usage").
+
+**A regression the eval harness caught, worth recording precisely** (see
+"What's validated" below for the numbers): while adding L2 reranking, an
+intermediate refactor collapsed first-stage relevance into a single rank
+before fusing usage — a change that read as cleaner and passed every
+existing qualitative unit test, but silently discarded the multi-channel
+margin described above. `eval/evaluate-usage-ranking.ts`, built specifically
+to give this class of question a numeric answer, caught it immediately as
+a measurable Recall@1 drop. Reverted, re-measured, confirmed fixed — see
+below. This is the concrete case for why §7 of the design doc insisted a
+harness-level eval was needed before the feature could be called
+validated, not just unit-tested.
 
 **Sybil resistance.** `unique_buyers` counting raw distinct Stellar
 addresses would be free to inflate, since this facilitator sponsors
@@ -769,34 +914,47 @@ that actually succeeded; this hook never touches the extension status the
 route handler reports back).
 
 **Rollout.** Lands behind `search()`'s existing `channels` option
-(`"usage"`, alongside `"lexical"`/`"vector"`); the HTTP discovery router
-enables all three by default, controlled by `DISCOVERY_USAGE_RANKING_ENABLED`
-(`server.ts`) so an operator can disable it instantly with no redeploy.
+(`"usage"` and `"l2rerank"`, alongside `"lexical"`/`"vector"`) — the HTTP
+discovery router runs lexical+vector only by default; both `"usage"` and
+`"l2rerank"` are opt-in, via `DISCOVERY_USAGE_RANKING_ENABLED` and
+`DISCOVERY_L2_RERANK_ENABLED` (`server.ts`, both default `false`).
+**Usage-ranking's default was deliberately changed from on to off** after
+the "What's validated" numbers below came in: it's not an RFP-required
+feature, and search quality is explicitly the RFP's most scrutinized
+surface, so shipping the higher-scoring configuration (relevance-only,
+Recall@1 0.949) as the default outweighs shipping the feature itself
+enabled — the tested, measured tradeoff is documented, not hidden, and the
+feature remains fully available for a deployment that wants it. Either
+channel can be toggled independently at any time, with no redeploy.
 `resource_buyers`'s retention sweep reuses the existing indexer
 reconciliation loop (`indexer.ts`) rather than a new scheduling mechanism.
 
-**What's validated, and what isn't yet.** `pnpm eval:search` re-run
-post-implementation shows no regression (Recall@1 0.949, Recall@5 1.000,
-NDCG@5 0.996 — matching the pre-implementation baseline; the eval fixtures
-carry no usage data, so the usage channel contributes nothing to their
-ranking either way). The specific claim "given two equally relevant
-resources, does the more-used one actually rank higher" is covered by a
-direct unit test constructing exactly that scenario. What's still open: a
-systematic, harness-level evaluation with synthetic usage data layered onto
-the full labeled query set (reporting Recall/NDCG with-and-without usage
-the same way the lexical-vs-hybrid comparison already does) is not yet
-written — the unit test proves the mechanism works on one constructed
-case, not the aggregate quality number this project holds its search
-architecture to elsewhere. See §7 of the design doc for this stated the
-same way at the point it was found.
+**What's validated.** `pnpm eval:search` shows no regression from either
+new stage (Recall@1 0.949, Recall@5 1.000, NDCG@5 0.996 — matching the
+pre-implementation baseline; the eval fixtures carry no usage data and
+don't enable `l2rerank`, so neither stage affects that number). The
+harness-level evaluation this section previously flagged as missing —
+synthetic usage data layered onto the full labeled query set, reporting
+Recall/NDCG with-and-without usage the same way the lexical-vs-hybrid
+comparison does — is now `pnpm eval:usage-ranking`
+(`eval/evaluate-usage-ranking.ts`), and it did real work: it caught a
+genuine implementation regression (Recall@1 0.949 → 0.615) that every
+qualitative unit test had missed, from an intermediate refactor that
+collapsed multi-channel relevance into a single rank before fusing usage.
+Fixed and re-measured at 0.692 under the same deliberately adversarial
+(fully usage/relevance-uncorrelated) synthetic scenario — see §7 of the
+design doc for why that residual is expected, not a lingering bug, and why
+a *zero*-flip result would itself have been the suspicious outcome.
 
-**Test coverage.** 50 tests in `packages/discovery/test/catalog.test.ts`
-(up from 32), 22 in `packages/facilitator/test/discovery-hooks.test.ts` (up
-from 15) — covering the write path's Sybil gate, the `SUM(...)/30` vs.
-`AVG(...)` derived-signal correctness, 30-day-window boundary behavior,
-retention pruning (and confirming it never touches `resource_usage_daily`),
-the second-RRF-pass ordering and candidate-set containment, and the hook's
-foreign-key guard, payer-sourcing, and failure isolation.
+**Test coverage.** 57 tests in `packages/discovery/test/catalog.test.ts` +
+`reranker.test.ts` (up from 32 before any of this ranking work began), 22
+in `packages/facilitator/test/discovery-hooks.test.ts` (up from 15) —
+covering the write path's Sybil gate, the `SUM(...)/30` vs. `AVG(...)`
+derived-signal correctness, 30-day-window boundary behavior, retention
+pruning (and confirming it never touches `resource_usage_daily`), the
+usage-RRF-pass ordering and candidate-set containment, L2 reranking's
+genuine (not incidental) reordering behavior and candidate-set containment,
+and the hook's foreign-key guard, payer-sourcing, and failure isolation.
 
 ## Automatic cataloging: provisional at receipt, confirmed at settlement
 

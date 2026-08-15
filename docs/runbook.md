@@ -134,6 +134,18 @@ settlement will make that specific `/settle` call visibly slower for the
 buyer. Accepted as a proportionate cost for the integrity guarantee it
 buys, not something to silently smooth over.
 
+**L2 semantic reranking latency (`DISCOVERY_L2_RERANK_ENABLED`).** Off by
+default, for a latency reason. Enabling it runs a real cross-encoder model
+over the top 50 first-stage search candidates on every `GET
+/discovery/search` request — measured ~800ms on commodity hardware (see
+"Usage-based ranking" in `docs/architecture.md`), a meaningful,
+caller-visible per-query latency cost, not a background job.
+`DISCOVERY_USAGE_RANKING_ENABLED` is also off by default, for a different
+reason — a measured relevance-quality tradeoff, not latency (see the same
+section). Consider whether search latency and/or the usage-ranking
+tradeoff matter for a given deployment before enabling either; both channels can be toggled
+independently at any time with no redeploy.
+
 ## Running the indexer (catalog reconciler)
 
 A genuinely separate process from the facilitator's HTTP server, with two

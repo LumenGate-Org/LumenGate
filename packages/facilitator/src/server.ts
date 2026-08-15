@@ -33,13 +33,24 @@ const BILLING_DB_PATH = process.env.BILLING_DB_PATH ?? "./data/billing.db";
 // X-Billing-Admin-Token on GET /billing/usage before exposing per-seller
 // volume data in a real deployment.
 const BILLING_ADMIN_TOKEN = process.env.BILLING_ADMIN_TOKEN;
-// On by default — the usage-ranking channel (docs/bazaar-usage-ranking-design.md
-// §2.2) is cheap (one indexed query per search, cold-start-safe RRF fusion)
-// and additive-only (never introduces a candidate the relevance channels
-// didn't already select). Set to "false" to disable it instantly — e.g. if
-// it's ever suspected of misbehaving — without an app-level code change or
-// redeploy, per §8's explicit toggle requirement.
-const DISCOVERY_USAGE_RANKING_ENABLED = process.env.DISCOVERY_USAGE_RANKING_ENABLED !== "false";
+// Off by default. The usage-ranking channel (docs/bazaar-usage-ranking-design.md
+// §2.2) is cheap and additive-only (never introduces a candidate the
+// relevance channels didn't already select) — but `eval/evaluate-usage-ranking.ts`
+// measured a real, disclosed relevance-quality tradeoff: Recall@1 0.949
+// (relevance-only) vs. 0.692 under a deliberately adversarial synthetic
+// usage scenario. Not a required RFP feature, and search quality is
+// explicitly the RFP's most scrutinized surface — the safer default ships
+// the higher-scoring configuration; usage-ranking stays fully built,
+// tested, and available for a deployment that wants it. Set to "true" to
+// enable it, no redeploy needed.
+const DISCOVERY_USAGE_RANKING_ENABLED = process.env.DISCOVERY_USAGE_RANKING_ENABLED === "true";
+// Off by default — unlike usage-ranking, L2 semantic reranking
+// (docs/bazaar-usage-ranking-design.md §2.1) runs a real cross-encoder
+// model over the top 50 first-stage candidates on every search: measured
+// ~800ms on commodity hardware (§2.1), a meaningful latency cost a
+// zero-config deployment shouldn't pay without an explicit opt-in. Set to
+// "true" to enable it.
+const DISCOVERY_L2_RERANK_ENABLED = process.env.DISCOVERY_L2_RERANK_ENABLED === "true";
 
 const secrets = (process.env.STELLAR_FACILITATOR_SECRETS ?? process.env.STELLAR_FACILITATOR_SECRET ?? "")
   .split(",")
@@ -357,12 +368,11 @@ app.get("/supported", (_req: Request, res: Response) => {
   }
 });
 
-app.use(
-  "/discovery",
-  createDiscoveryRouter(catalog, {
-    searchChannels: DISCOVERY_USAGE_RANKING_ENABLED ? ["lexical", "vector", "usage"] : ["lexical", "vector"],
-  }),
-);
+const discoverySearchChannels: ("lexical" | "vector" | "usage" | "l2rerank")[] = ["lexical", "vector"];
+if (DISCOVERY_L2_RERANK_ENABLED) discoverySearchChannels.push("l2rerank");
+if (DISCOVERY_USAGE_RANKING_ENABLED) discoverySearchChannels.push("usage");
+
+app.use("/discovery", createDiscoveryRouter(catalog, { searchChannels: discoverySearchChannels }));
 
 app.get("/billing/usage", (req: Request, res: Response) => {
   if (BILLING_ADMIN_TOKEN && req.header("X-Billing-Admin-Token") !== BILLING_ADMIN_TOKEN) {

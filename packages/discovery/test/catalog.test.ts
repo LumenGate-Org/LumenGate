@@ -579,6 +579,101 @@ describe("BazaarCatalog", () => {
         expect(result.resources.map(r => r.resourceUrl)).not.toContain("https://api.example.com/irrelevant-but-popular");
       });
     });
+
+    describe("search() l2rerank channel", () => {
+      it("corrects a lexically-favored but semantically wrong candidate when enabled", async () => {
+        // Contains both "weather" and "forecast" literally (wins lexically)
+        // but is genuinely about a board game, not a forecast API — a
+        // real cross-encoder should judge it a weak match for the query.
+        await catalog.upsert(
+          httpResource({
+            resourceUrl: "https://api.example.com/board-games",
+            description: "A weather forecast themed board game for family game night",
+            serviceName: "PartyCo",
+            tags: ["games"],
+          }),
+          CONFIRMED,
+        );
+        // Zero literal overlap with the query — found only via the vector
+        // channel — but the genuine match.
+        await catalog.upsert(
+          httpResource({
+            resourceUrl: "https://api.example.com/forecast",
+            description: "Daily atmospheric conditions and precipitation outlook by city",
+            serviceName: "Atmos",
+            tags: ["meteorology"],
+          }),
+          CONFIRMED,
+        );
+
+        const withoutL2 = await catalog.search({ query: "weather forecast" }, { channels: ["lexical", "vector"] });
+        expect(withoutL2.resources[0]?.resourceUrl).toBe("https://api.example.com/board-games"); // lexical match wins first-stage
+
+        const withL2 = await catalog.search(
+          { query: "weather forecast" },
+          { channels: ["lexical", "vector", "l2rerank"] },
+        );
+        expect(withL2.resources[0]?.resourceUrl).toBe("https://api.example.com/forecast"); // cross-encoder corrects it
+      });
+
+      it("does not affect ranking when l2rerank is omitted (default, backward compatible)", async () => {
+        await catalog.upsert(
+          httpResource({ resourceUrl: "https://api.example.com/weather-a", description: "weather forecast API" }),
+          CONFIRMED,
+        );
+        const withoutL2 = await catalog.search({ query: "weather forecast" }, { channels: ["lexical", "vector"] });
+        const withDefault = await catalog.search({ query: "weather forecast" });
+        expect(withDefault.resources.map(r => r.resourceUrl)).toEqual(withoutL2.resources.map(r => r.resourceUrl));
+      });
+
+      it("never introduces a candidate outside the first-stage retrieval set", async () => {
+        await catalog.upsert(
+          httpResource({ resourceUrl: "https://api.example.com/weather-match", description: "weather forecast API" }),
+          CONFIRMED,
+        );
+        await catalog.upsert(
+          httpResource({
+            resourceUrl: "https://api.example.com/totally-unrelated",
+            description: "video transcoding pipeline",
+            serviceName: "Transcode Co",
+            tags: ["video"],
+          }),
+          CONFIRMED,
+        );
+
+        const result = await catalog.search({ query: "weather forecast" }, { channels: ["lexical", "vector", "l2rerank"] });
+        expect(result.resources.map(r => r.resourceUrl)).not.toContain("https://api.example.com/totally-unrelated");
+      });
+
+      it("composes with the usage channel without error, fusing against the l2-reranked order", async () => {
+        await catalog.upsert(
+          httpResource({
+            resourceUrl: "https://api.example.com/board-games",
+            description: "A weather forecast themed board game for family game night",
+            serviceName: "PartyCo",
+            tags: ["games"],
+          }),
+          CONFIRMED,
+        );
+        await catalog.upsert(
+          httpResource({
+            resourceUrl: "https://api.example.com/forecast",
+            description: "Daily atmospheric conditions and precipitation outlook by city",
+            serviceName: "Atmos",
+            tags: ["meteorology"],
+          }),
+          CONFIRMED,
+        );
+
+        const result = await catalog.search(
+          { query: "weather forecast" },
+          { channels: ["lexical", "vector", "l2rerank", "usage"] },
+        );
+        expect(result.resources.map(r => r.resourceUrl).sort()).toEqual(
+          ["https://api.example.com/board-games", "https://api.example.com/forecast"].sort(),
+        );
+      });
+    });
   });
 
   describe("pending_catalog durable outbox (crash-safe cataloging)", () => {
