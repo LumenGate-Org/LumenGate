@@ -7,7 +7,11 @@ see [`specs/schemes/upto/scheme_upto_stellar.md`](../specs/schemes/upto/scheme_u
 For architecture and design rationale, see [`architecture.md`](./architecture.md).
 The sections below are organized by role so the same guide can serve sellers,
 buyers, agents, and facilitator operators without requiring repo-specific
-background first.
+background first — deliberately, since the intent is to contribute this
+guide to the Stellar Developer Docs once the project reaches a stability
+point worth publishing externally (see "Maintenance and support plan" in
+`docs/runbook.md`); a guide that only makes sense alongside this
+repository's own internal context wouldn't transplant there cleanly.
 
 ## Prerequisites
 

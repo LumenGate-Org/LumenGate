@@ -319,16 +319,32 @@ This project needs a clear maintenance commitment and handoff path:
   is written in the shape expected by `x402-foundation/x402`, coordinated
   through the x402 Technical Steering Committee — once merged, the spec itself is
   maintained by the Foundation's normal process, not tied to this repo's
-  own lifecycle.
-- **Spec-evolution tracking.** The Bazaar discovery layer's behavior
-  (cataloging rules, `EXTENSION-RESPONSES` semantics, soft-drop validation)
-  is implemented almost entirely by calling into `@x402/extensions/bazaar`
-  rather than reimplementing it — see "What's reused vs. original" in
+  own lifecycle. `docs/developer-guide.md` is similarly written in the
+  role-based structure (seller / buyer-agent / operator paths, each with a
+  runnable example) the Stellar Developer Docs expect, with the intent of
+  contributing it there once this project reaches a stability point worth
+  publishing externally — not yet submitted, stated as a planned next step
+  rather than a completed one.
+- **Spec-evolution tracking, as a real mechanism, not just a promise.** The
+  Bazaar discovery layer's behavior (cataloging rules,
+  `EXTENSION-RESPONSES` semantics, soft-drop validation) is implemented
+  almost entirely by calling into `@x402/extensions/bazaar` rather than
+  reimplementing it — see "What's reused vs. original" in
   `docs/architecture.md`. That's a deliberate maintenance decision as much
   as an engineering one: as the Foundation evolves discovery conventions,
   bumping the `@x402/extensions` dependency carries most of that evolution
   forward automatically, rather than this project's own code drifting out
-  of sync with the spec.
+  of sync with the spec. This is now a closed loop, not a one-time
+  intention: Dependabot (`.github/dependabot.yml`) opens a weekly PR the
+  moment `@x402/core`, `@x402/stellar`, or `@x402/extensions` publish a new
+  version, and that PR only merges once the full CI suite — lint,
+  typecheck, the complete test suite, both license-compliance checks, and
+  all three contracts' own test suites — passes against it. A silent
+  upstream spec change either shows up as a passing dependency bump (no
+  action needed) or a failing one (surfaced automatically, not discovered
+  later by a user). This is the concrete answer to "track the spec as it
+  changes... commit to conformance updates through the grant period" —
+  a standing pipeline, not a one-time report.
 - **Code maintenance.** This repository is intended to remain actively
   maintained past the initial maintenance window; issues and pull requests are the primary
   channel. If maintenance capacity changes, the plan is a clean handoff
