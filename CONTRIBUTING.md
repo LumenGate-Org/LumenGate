@@ -11,15 +11,22 @@ pnpm test
 pnpm typecheck
 ```
 
-For Soroban contract changes, also run the relevant contract tests:
+For Soroban contract changes, also run the relevant contract's tests and
+lint — CI runs both as required checks (`.github/workflows/ci.yml`'s
+`contracts` job), so a PR that only passes `cargo test` will still fail CI
+on a clippy warning:
 
 ```bash
-cd contracts/upto-settlement-escrow
+cd contracts/upto-settlement-escrow # or upto-settlement, or custom-account-demo
 cargo test
-
-cd ../upto-settlement
-cargo test
+cargo clippy --all-targets -- -D warnings
 ```
+
+CI additionally runs `cargo audit` (dependency-vulnerability scan) and a
+Soroban-specific static analyzer (Scout) against every contract on every
+push and pull request — see "Scope boundaries" in
+[`docs/architecture.md`](./docs/architecture.md) for why, and what these
+have already found and fixed.
 
 ## Pull Request Expectations
 

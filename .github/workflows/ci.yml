@@ -59,11 +59,60 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        with:
+          components: clippy
       - run: cargo test
         working-directory: contracts/upto-settlement-escrow
       - run: cargo test
         working-directory: contracts/upto-settlement
       - run: cargo test
         working-directory: contracts/custom-account-demo
+      # Lint as a real gate, not decorative: -D warnings fails the build on
+      # any clippy lint, same as any other required check here.
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: contracts/upto-settlement-escrow
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: contracts/upto-settlement
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: contracts/custom-account-demo
       - run: cargo install cargo-license
       - run: ./scripts/check-cargo-licenses.sh
+      # Dependency-vulnerability scan (RustSec advisory DB). See
+      # scripts/check-cargo-audit.sh — this is part of the audit-tooling
+      # pass documented in docs/architecture.md ("Scope boundaries"),
+      # before a third-party security review, not a substitute for one.
+      - run: cargo install cargo-audit --locked
+      - run: ./scripts/check-cargo-audit.sh
+
+  scout:
+    name: Soroban Static Analysis (Scout)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        contract:
+          - upto-settlement-escrow
+          - upto-settlement
+          - custom-account-demo
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      # CoinFabrik's Soroban-specific static analyzer, part of the same
+      # audit-tooling pass as clippy/cargo-audit above — catches Soroban/
+      # smart-contract-specific patterns those two don't (e.g. auth-check
+      # gaps, storage-key collisions). Runs via a Docker image this action
+      # builds `FROM coinfabrik/scout:latest` — that base image tag is not
+      # pinned to a digest, unlike every other action in this file; disclosed
+      # here rather than silently accepted, since it's a real (if narrow)
+      # exception to this repo's pin-to-SHA convention.
+      - name: Scout
+        uses: coinfabrik/scout-actions@2ce66b2491a180e43dc4a5aba727b9bbf535a1d0 # v3
+        with:
+          target: contracts/${{ matrix.contract }}
+      - name: Fail if Scout found issues
+        run: |
+          if [ -f "${{ github.workspace }}/FAIL" ]; then
+            echo "Scout found issues in contracts/${{ matrix.contract }} — see the report.md artifact/log above."
+            exit 1
+          fi

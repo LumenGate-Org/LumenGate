@@ -128,6 +128,13 @@ impl UptoSettlement {
     /// allowance before returning `isValid: true` (see `stellar-upto` package).
     ///
     /// Returns `(seller_amount, facilitator_fee)`.
+    #[allow(clippy::too_many_arguments)] // mirrors the client's signed witness
+    // tuple (from, pay_to, facilitator, token, max_amount, request_nonce,
+    // deadline, fee_bps, fee_fixed, fee_mode) plus `env` and `actual_amount` —
+    // splitting the signed fields into a struct would need its own
+    // `IntoVal`/argument-order guarantee, adding indirection to the exact
+    // place a mismatch would be hardest to catch, for no reduction in what
+    // the function actually receives.
     pub fn settle(
         env: Env,
         from: Address,

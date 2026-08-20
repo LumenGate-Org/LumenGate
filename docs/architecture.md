@@ -1182,19 +1182,32 @@ seller-side discovery/pricing helpers (`packages/sdk/src/seller.ts` —
   explicitly rather than left implicit. See
   `e2e/conformance/CONFORMANCE_REPORT.md` — every round has its own section
   with the full before/after. **Before commissioning a third-party audit,
-  the plan is to run the contracts through automated static-analysis/audit
-  tooling** — a Soroban-specific static analyzer (e.g. Scout) plus
-  dependency-vulnerability scanning (`cargo audit`) and `cargo clippy`,
-  neither of which is wired into CI yet (`.github/workflows/ci.yml`
-  currently only runs `cargo test` and license checks for the Rust side) —
-  and fix whatever it surfaces first, so a paid third-party audit is spent
+  the plan is automated static-analysis/audit tooling — and this is now a
+  real, required CI gate, not a described intention.** `.github/workflows/ci.yml`'s
+  `contracts` job runs `cargo clippy --all-targets -- -D warnings` (fails
+  the build on any lint, not just reports it) and `cargo audit`
+  (`scripts/check-cargo-audit.sh`, scanning each contract's `Cargo.lock`
+  against the RustSec advisory database) on every push and pull request,
+  alongside the existing `cargo test`/license checks. A separate `scout` job
+  runs CoinFabrik's Soroban-specific static analyzer (Scout) against each
+  contract independently and fails the build on any finding. Running these
+  did surface one real thing worth fixing, not zero: `settle()`'s
+  12-parameter signature (mirroring the client's signed witness tuple plus
+  `env`/`actual_amount`) tripped clippy's argument-count lint in both
+  settlement contracts — resolved with a scoped, commented
+  `#[allow(clippy::too_many_arguments)]` rather than restructuring a
+  well-tested, spec-defined signature into an artificial wrapper type purely
+  to satisfy a lint. `cargo audit` currently reports one pre-existing,
+  non-blocking finding (`paste` v1.0.15, RUSTSEC-2024-0436, "unmaintained" —
+  a transitive Soroban SDK dependency, not something this project's own code
+  can address directly; `cargo audit` itself treats this as a warning, not a
+  failure, unless a real vulnerability is later filed against it). This
+  tooling pass finding and fixing something real, before any third party
+  looks at it, is exactly the point — a paid third-party audit is spent
   finding what tooling and manual review together couldn't, not
-  re-discovering issues a linter would have caught for free. Not yet run as
-  of this writing — a committed next step, not a claim it's already been
-  done. Treat the current state as
-  a rigorously self-validated proof of concept, not production-hardened
-  infrastructure, until that tooling pass and a third-party assessment are
-  both complete.
+  re-discovering an argument-count lint. Treat the current state as a
+  rigorously self-validated proof of concept, not production-hardened
+  infrastructure, until a third-party assessment is also complete.
 - **`/verify` and `/settle` are intentionally unauthenticated.** Any resource
   server can call them with no prior registration — required by x402's own
   "no accounts, no API keys" design, the same posture Coinbase's reference
