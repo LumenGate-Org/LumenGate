@@ -161,14 +161,24 @@ payload attached. The resource server calls this facilitator's `POST /verify` to
 confirm the payload is well-formed and properly authorized *before* serving
 the resource (no funds move yet), then, once it has served the response,
 `POST /settle` to actually submit the transaction and move funds
-on-chain. A successful settlement triggers two further, asynchronous
-facilitator-side effects the buyer never has to wait on directly: the
-resource gets cataloged into Bazaar (see "Automatic cataloging" below) and,
-for `exact`/standard `upto`, an off-chain billing record is written (see
-"The three-tier billing model" immediately below). The facilitator itself
-holds no funds in transit at any point — every settlement moves value
-directly from buyer to seller (and, for managed `upto`, to the facilitator's
-fee share) in one atomic on-chain operation; there is no custodial step.
+on-chain. Cataloging into Bazaar is **not** a settlement-triggered effect —
+it happens at `verify()` time instead, gated on independent verification of
+the resource's actual payment information, the moment a `PaymentPayload`
+carrying the discovery extension is received (see "Automatic cataloging"
+below for exactly why and how). A successful settlement does trigger one
+asynchronous facilitator-side effect the buyer never has to wait on
+directly: for `exact`/standard `upto`, an off-chain billing record is
+written (see "The three-tier billing model" immediately below). The
+facilitator itself holds no funds in transit at any point, for any scheme —
+but the mechanics differ: `exact` payments move directly from buyer to
+seller in one atomic on-chain operation; for
+standard and managed `upto`, the authorized ceiling is transferred into the
+settlement contract within that same atomic transaction, which then pays
+the seller the actual metered amount (and the facilitator's fee share, for
+managed `upto`) and refunds the remainder to the buyer — see
+"Decentralization" below for the full non-custodial argument. There is no
+custodial step in either case, but "every settlement moves value directly
+from buyer to seller" is only literally true for `exact`.
 
 ## The three-tier billing model
 
@@ -237,6 +247,39 @@ from the facilitator's `onAfterSettle` hook when `result.success` is true,
 so failed verifications and failed settlements never reach the billing
 ledger at all; this is structural, not a filter the ledger applies
 after the fact.
+
+**Renewable free-settlement quotas are an off-chain mechanism today, for
+all three tiers — including managed `upto`, where that's a real gap against
+this project's own target architecture, not just an implementation detail.**
+`SellerBillingPlan`'s free-settlement count and renewal period
+(`BillingLedger.setSellerPlan`) is TypeScript-side state, read only from
+`packages/facilitator/src/billing.ts`'s `onAfterSettle` hook — the exact
+same off-chain metering tiers 1-2 use. Managed `upto`'s on-chain `feeBps`/
+`feeFixed`/`feeMode` (above) are a **static, per-route configuration**
+(`UptoStellarServerOptions`), baked into every `PaymentRequirements` a
+route advertises — the contract has no concept of "the first N settlements
+this period are free," and nothing today makes the on-chain fee vary based
+on a seller's remaining quota. A seller can configure a managed-`upto`
+route's fee to `0`, but that's a permanent off-switch for that route, not a
+renewable allowance.
+
+This project's target architecture for managed `upto` is for the renewable
+free-quota logic to move on-chain too, the same way the fee itself did —
+consistent with the point of the "managed" tier being that a seller
+shouldn't have to trust off-chain bookkeeping. Doing so needs real,
+persistent on-chain state the settlement contract does not carry today: a
+configured free-settlement count, a renewal period (day/month/year, mirroring
+`SellerBillingPlan`), a consumed-this-period counter, and a period start/id
+to detect and reset on rollover — keyed per seller (`pay_to`) the same way
+`SellerBillingPlan` is. This is a deliberate, disclosed gap, not an
+oversight: it's a genuinely new architectural tradeoff against
+escrow-and-refund's current zero-persistent-storage property (see "The
+`upto` settlement design" below and its benchmark comparison), not a small
+addition, so it's
+being tracked as explicit future work rather than rushed into this PoC
+without the same adversarial review the existing on-chain fee logic went
+through. **Not yet built — a stated target, not a claim of present
+behavior.**
 
 **Who authorizes the fee.** Only the buyer signs anything in this design —
 there is no seller-side signature at all (see the seller-authorization row

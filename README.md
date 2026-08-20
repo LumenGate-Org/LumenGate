@@ -20,12 +20,15 @@ LumenGate distinguishes three settlement architectures:
   into the atomic settlement transaction.
 
 LumenGate uses the same configurable facilitator-fee model — fixed,
-percentage-based, or min/max combined fees, together with renewable free
-settlement quotas — across `exact`, standard `upto`, and managed `upto`.
-Exact and standard `upto` compute and bill facilitator fees off-chain, while
-managed `upto` integrates the facilitator fee into the atomic on-chain
-settlement, where the settlement contract additionally enforces a maximum
-facilitator fee percentage independently of any off-chain configuration.
+percentage-based, or min/max combined fees — across `exact`, standard
+`upto`, and managed `upto`. Exact and standard `upto` compute and bill
+facilitator fees off-chain, while managed `upto` integrates the facilitator
+fee into the atomic on-chain settlement, where the settlement contract
+additionally enforces a maximum facilitator fee percentage independently of
+any off-chain configuration. Renewable free-settlement quotas are an
+off-chain mechanism today, covering exact and standard `upto`; moving that
+allowance logic on-chain for managed `upto` is targeted future work, not yet
+built — see "The three-tier billing model" in `docs/architecture.md`.
 
 ## Bazaar Discovery And MCP
 

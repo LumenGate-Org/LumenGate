@@ -49,9 +49,17 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # Build first: workspace packages resolve each other through their
+      # package.json "exports" map, which points at compiled dist/ output
+      # (dist/ is gitignored, not committed) — so a package that imports a
+      # workspace sibling via a subpath export (e.g. sdk importing
+      # @x402-stellar/upto/client) cannot typecheck or run its tests against
+      # a fresh checkout until that sibling has actually been built once.
+      # `-r`'s topological ordering alone doesn't cover this: a dependency's
+      # own `typecheck`/`test` script runs first, but neither one emits.
+      - run: pnpm build
       - run: pnpm typecheck
       - run: pnpm test
-      - run: pnpm build
 
   contracts:
     name: Soroban Contracts
