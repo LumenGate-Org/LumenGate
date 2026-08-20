@@ -19,9 +19,10 @@ export const SETTLE_FUNCTION_NAME = "settle";
  *
  * This is the single source of truth for the witness encoding — it MUST equal,
  * in this exact order, the args tuple bound in `from.require_auth_for_args(...)`
- * inside `contracts/upto-settlement/src/lib.rs`:
+ * inside `contracts/upto-settlement/src/lib.rs` (and the escrow design's mirror):
  *
- *   (from, pay_to, facilitator, token, max_amount, request_nonce, deadline, fee_bps)
+ *   (from, pay_to, facilitator, token, max_amount, request_nonce, deadline,
+ *    fee_bps, fee_fixed, fee_mode)
  *
  * `actual_amount` is deliberately excluded — see `UptoWitnessCommitment` docs.
  *
@@ -38,11 +39,13 @@ export function buildWitnessScArgs(commitment: UptoWitnessCommitment): xdr.ScVal
     nativeToScVal(commitment.requestNonce, { type: "u64" }),
     nativeToScVal(commitment.deadline, { type: "u64" }),
     nativeToScVal(commitment.feeBps, { type: "u32" }),
+    nativeToScVal(commitment.feeFixed, { type: "i128" }),
+    nativeToScVal(commitment.feeMode, { type: "u32" }),
   ];
 }
 
 /**
- * Builds the full 9-argument ScVal list for a real `settle(...)` invocation
+ * Builds the full 11-argument ScVal list for a real `settle(...)` invocation
  * (client simulation at request time using `actualAmount = maxAmount` as the
  * worst-case placeholder, or the facilitator's real settlement call using the
  * metered `actualAmount`).
@@ -55,7 +58,7 @@ export function buildSettleScArgs(
   commitment: UptoWitnessCommitment,
   actualAmount: bigint,
 ): xdr.ScVal[] {
-  const [from, payTo, facilitator, token, maxAmount, requestNonce, deadline, feeBps] =
+  const [from, payTo, facilitator, token, maxAmount, requestNonce, deadline, feeBps, feeFixed, feeMode] =
     buildWitnessScArgs(commitment);
   return [
     from,
@@ -67,5 +70,7 @@ export function buildSettleScArgs(
     requestNonce,
     deadline,
     feeBps,
+    feeFixed,
+    feeMode,
   ];
 }

@@ -11,6 +11,25 @@ vi.mock("node:dns/promises", async importOriginal => {
   return { ...actual, lookup: vi.fn(actual.lookup) };
 });
 
+// The MCP path connects with a real @modelcontextprotocol/sdk Client over a
+// real network transport — mocked here the same way `fetch` is mocked for
+// the HTTP path, so these tests exercise this module's own logic (SSRF
+// guards, tool-name matching, fail-closed behavior) without a real MCP
+// server.
+const mcpConnect = vi.fn();
+const mcpListTools = vi.fn();
+const mcpClose = vi.fn();
+vi.mock("@modelcontextprotocol/sdk/client/index.js", () => ({
+  Client: vi.fn().mockImplementation(() => ({
+    connect: mcpConnect,
+    listTools: mcpListTools,
+    close: mcpClose,
+  })),
+}));
+vi.mock("@modelcontextprotocol/sdk/client/streamableHttp.js", () => ({
+  StreamableHTTPClientTransport: vi.fn(),
+}));
+
 import { verifyResourceOwnership, type OwnershipCheckInput } from "../src/resource-ownership.js";
 
 function requirements(overrides: Partial<PaymentRequirements> = {}): PaymentRequirements {
@@ -49,16 +68,67 @@ function response402(accepts: PaymentRequirements[]): Response {
 describe("verifyResourceOwnership", () => {
   beforeEach(() => {
     vi.stubGlobal("fetch", vi.fn());
+    mcpConnect.mockReset().mockResolvedValue(undefined);
+    mcpListTools.mockReset().mockResolvedValue({ tools: [{ name: "get-weather" }] });
+    mcpClose.mockReset().mockResolvedValue(undefined);
   });
 
   afterEach(() => {
     vi.unstubAllGlobals();
   });
 
-  it("skips MCP resources (not implemented for that transport)", async () => {
-    const result = await verifyResourceOwnership(input({ type: "mcp" }));
-    expect(result.outcome).toBe("skipped");
-    expect(fetch).not.toHaveBeenCalled();
+  describe("MCP resources", () => {
+    function mcpInput(overrides: Partial<OwnershipCheckInput> = {}): OwnershipCheckInput {
+      return input({ type: "mcp", toolName: "get-weather", ...overrides });
+    }
+
+    it("verifies when the live MCP server lists a tool with the matching name", async () => {
+      const result = await verifyResourceOwnership(mcpInput());
+      expect(result.outcome).toBe("verified");
+      expect(mcpConnect).toHaveBeenCalledTimes(1);
+      expect(mcpClose).toHaveBeenCalledTimes(1);
+    });
+
+    it("fails closed when the live MCP server has no tool with that name", async () => {
+      mcpListTools.mockResolvedValue({ tools: [{ name: "some-other-tool" }] });
+      const result = await verifyResourceOwnership(mcpInput());
+      expect(result.outcome).toBe("failed");
+      expect(result).toMatchObject({ reason: expect.stringContaining("get-weather") });
+    });
+
+    it("fails closed when connecting to the MCP server throws", async () => {
+      mcpConnect.mockRejectedValue(new Error("ECONNREFUSED"));
+      const result = await verifyResourceOwnership(mcpInput());
+      expect(result.outcome).toBe("failed");
+    });
+
+    it("fails closed when toolName is missing from the submission", async () => {
+      const result = await verifyResourceOwnership(mcpInput({ toolName: undefined }));
+      expect(result.outcome).toBe("failed");
+      expect(mcpConnect).not.toHaveBeenCalled();
+    });
+
+    it("refuses plain HTTP to a non-loopback MCP host without ever connecting", async () => {
+      const result = await verifyResourceOwnership(
+        mcpInput({ resourceUrl: "http://seller.example.com/mcp" }),
+      );
+      expect(result.outcome).toBe("failed");
+      expect(mcpConnect).not.toHaveBeenCalled();
+    });
+
+    it("refuses an MCP resourceUrl that resolves to a private address", async () => {
+      const result = await verifyResourceOwnership(
+        mcpInput({ resourceUrl: "http://169.254.169.254/mcp" }),
+      );
+      expect(result.outcome).toBe("failed");
+      expect(mcpConnect).not.toHaveBeenCalled();
+    });
+
+    it("always closes the client connection, even on failure", async () => {
+      mcpListTools.mockRejectedValue(new Error("boom"));
+      await verifyResourceOwnership(mcpInput());
+      expect(mcpClose).toHaveBeenCalledTimes(1);
+    });
   });
 
   it("verifies when the live 402 names the same payTo for the matching scheme/network/asset", async () => {

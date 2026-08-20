@@ -42,26 +42,24 @@ export interface CatalogResource {
   extensions?: Record<string, unknown>;
   lastUpdated: string;
   /**
-   * `"provisional"`: cataloged on a validated `PaymentPayload` receipt
-   * (verify-time), per protocol cataloging trigger (Section 3.2:
-   * "when the facilitator receives a PaymentPayload... it validates info
-   * against the supplied schema and catalogs the resource"), before any
-   * settlement has happened. Bounded-lifetime (see `provisionalExpiresAt`)
-   * and evicted if never confirmed. `"confirmed"`: promoted at settle-time
-   * once a real settlement succeeded — permanent, no expiry. See "Automatic
-   * cataloging: provisional at receipt, confirmed at settlement" in
-   * docs/architecture.md for the full rationale.
+   * ISO timestamp of the last time this resource's actual payment
+   * information (payTo/pricing) was independently verified against its
+   * live source — the resource's own 402 response for HTTP, the identified
+   * MCP resource/tool's payment metadata for MCP — rather than merely
+   * accepted from a submitted discovery payload. Every insert or update
+   * sets this at write time (cataloging is gated on that verification
+   * succeeding — see "Automatic cataloging" in docs/architecture.md); it is
+   * also refreshed by periodic re-verification
+   * (`listStaleForReverification`) so pricing/payTo drift is caught even
+   * for a resource nobody has resubmitted discovery metadata for recently.
    */
-  status: "provisional" | "confirmed";
-  /** ISO timestamp after which a `"provisional"` entry is evicted if never confirmed. `undefined` for `"confirmed"` entries. */
-  provisionalExpiresAt?: string;
+  lastVerifiedAt: string;
 }
 
 /** Options controlling how `BazaarCatalog.upsert` records a resource. */
 export interface UpsertOptions {
-  status: "provisional" | "confirmed";
-  /** Required when `status` is `"provisional"`; ignored for `"confirmed"`. */
-  provisionalExpiresAt?: string;
+  /** ISO timestamp this upsert's independent verification completed at. */
+  lastVerifiedAt: string;
 }
 
 export interface ListFilters {

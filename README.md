@@ -19,9 +19,13 @@ LumenGate distinguishes three settlement architectures:
 - Managed `upto`: usage-based payments where the facilitator fee is integrated
   into the atomic settlement transaction.
 
-The off-chain business model supports renewable free settlement quotas and
-configurable fixed, percentage-based, or min/max combined fees. Managed `upto`
-adds an on-chain percentage fee split paid atomically with the seller payment.
+LumenGate uses the same configurable facilitator-fee model — fixed,
+percentage-based, or min/max combined fees, together with renewable free
+settlement quotas — across `exact`, standard `upto`, and managed `upto`.
+Exact and standard `upto` compute and bill facilitator fees off-chain, while
+managed `upto` integrates the facilitator fee into the atomic on-chain
+settlement, where the settlement contract additionally enforces a maximum
+facilitator fee percentage independently of any off-chain configuration.
 
 ## Bazaar Discovery And MCP
 
@@ -38,9 +42,10 @@ inspect, and access x402 services through tool calls.
 ## Current Traction
 
 LumenGate is implemented as a working Stellar testnet prototype. The repository
-contains 234 automated tests: 203 TypeScript tests and 31 Rust contract tests.
-Core flows, including the atomic on-chain facilitator fee split, are validated
-through verifiable testnet transactions recorded in the conformance report.
+contains 309 automated tests: 260 TypeScript tests across 5 packages and 49
+Rust contract tests across 3 Soroban contracts. Core flows, including the
+atomic on-chain facilitator fee split, are validated through verifiable
+testnet transactions recorded in the conformance report.
 
 The configurable business model is implemented across fixed, percentage-based,
 and min/max combined off-chain pricing. Two `upto` architectures were built,

@@ -10,29 +10,48 @@ import type {
   SupportedKind,
 } from "@x402/core/types";
 import { MAX_FEE_BPS } from "../constants.js";
+import { UptoFeeMode } from "../types.js";
 
 export interface UptoStellarServerOptions {
   /**
-   * Fee, in basis points, this resource server wants the facilitator to take
-   * on-chain at settlement time. `0` (default) = standard `upto`: full amount
-   * to the seller, facilitator bills off-chain (mirrors `exact`'s billing
-   * model). `> 0` = "managed upto": the client's signature commits to this
-   * exact value, so it cannot be raised later. Must be `<= maxFeeBps`
-   * advertised by the facilitator (and `<= MAX_FEE_BPS` enforced on-chain).
+   * Percentage-component fee, in basis points, this resource server wants
+   * the facilitator to take on-chain at settlement time. `0` (default,
+   * with `feeMode: Percentage`) = standard `upto`: full amount to the
+   * seller, facilitator bills off-chain (mirrors `exact`'s billing model).
+   * `> 0` = "managed upto": the client's signature commits to this exact
+   * value, so it cannot be raised later. The effective fee (however
+   * `feeMode` computes it) is always `<= MAX_FEE_BPS` of the settled
+   * amount, enforced on-chain.
    */
   feeBps?: number;
+  /**
+   * Fixed-component fee, in the settlement asset's own atomic units (not
+   * USD — the settlement contract has no price oracle). Used when
+   * `feeMode` is `Fixed`, `CombinedMin`, or `CombinedMax`. Default `0n`.
+   */
+  feeFixed?: bigint;
+  /**
+   * How `feeBps`/`feeFixed` combine into the effective on-chain fee,
+   * mirroring `BillingFeeConfig`'s fixed/percentage/combined shape
+   * (`packages/facilitator/src/billing.ts`) so the same configurable
+   * business model applies to managed `upto`, not only the off-chain-billed
+   * tiers. Default `UptoFeeMode.Percentage`.
+   */
+  feeMode?: UptoFeeMode;
 }
 
 /**
  * Stellar resource-server implementation for the `upto` payment scheme.
- * Declares the `feeBps` billing tier (standard vs. managed) for routes that
- * register this scheme instance; register two instances (e.g. one at
- * `feeBps: 0` and one at `feeBps: 1000`) to offer both tiers on different
- * routes of the same server.
+ * Declares the fee tier (standard vs. managed, and which fee mode) for
+ * routes that register this scheme instance; register multiple instances
+ * (e.g. one at `feeBps: 0` and one at `feeBps: 1000`) to offer several
+ * tiers on different routes of the same server.
  */
 export class UptoStellarScheme implements SchemeNetworkServer {
   readonly scheme = "upto";
   private readonly feeBps: number;
+  private readonly feeFixed: bigint;
+  private readonly feeMode: UptoFeeMode;
   private moneyParsers: MoneyParser[] = [];
 
   constructor(options: UptoStellarServerOptions = {}) {
@@ -40,7 +59,13 @@ export class UptoStellarScheme implements SchemeNetworkServer {
     if (feeBps < 0 || feeBps > MAX_FEE_BPS) {
       throw new Error(`feeBps must be between 0 and ${MAX_FEE_BPS}, got ${feeBps}`);
     }
+    const feeFixed = options.feeFixed ?? 0n;
+    if (feeFixed < 0n) {
+      throw new Error(`feeFixed must be non-negative, got ${feeFixed}`);
+    }
     this.feeBps = feeBps;
+    this.feeFixed = feeFixed;
+    this.feeMode = options.feeMode ?? UptoFeeMode.Percentage;
   }
 
   /**
@@ -95,6 +120,8 @@ export class UptoStellarScheme implements SchemeNetworkServer {
         settlementContract: facilitatorExtra.settlementContract,
         facilitatorAddress: facilitatorExtra.facilitatorAddress,
         feeBps: this.feeBps,
+        feeFixed: this.feeFixed.toString(),
+        feeMode: this.feeMode,
         areFeesSponsored: facilitatorExtra.areFeesSponsored ?? true,
       },
     });
@@ -105,6 +132,12 @@ export class UptoStellarScheme implements SchemeNetworkServer {
     supportedKind: SupportedKind,
     _facilitatorExtensions: string[],
   ): string | void {
+    // Only a static pre-check for Percentage mode: the effective fee in
+    // Fixed/Combined modes depends on the settled amount, which isn't known
+    // here, so it can't be validated statically — the contract's own
+    // percentage-of-actual-amount ceiling is the real enforcement point for
+    // every mode, checked at settlement time regardless.
+    if (this.feeMode !== UptoFeeMode.Percentage) return;
     const facilitatorExtra = supportedKind.extra as { maxFeeBps?: number } | undefined;
     if (facilitatorExtra?.maxFeeBps !== undefined && this.feeBps > facilitatorExtra.maxFeeBps) {
       return `Configured feeBps (${this.feeBps}) exceeds facilitator's advertised maxFeeBps (${facilitatorExtra.maxFeeBps})`;

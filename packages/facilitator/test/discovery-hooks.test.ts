@@ -7,10 +7,9 @@ import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
  * `extractDiscoveryInfo` (upstream, `@x402/extensions/bazaar`) is mocked
  * rather than exercised for real: its own extraction/validation logic is
  * already the upstream package's concern. What these tests verify is ours —
- * protocol cataloging trigger (provisional at a validated `verify`
- * receipt) plus the anti-spam bound on top of it (bounded-lifetime unless
- * confirmed by a real settlement) — see "Automatic cataloging: provisional
- * at receipt, confirmed at settlement" in docs/architecture.md.
+ * the protocol's literal cataloging trigger (a validated `verify` receipt,
+ * not settlement) gated on independent payment-information verification
+ * before indexing — see "Automatic cataloging" in docs/architecture.md.
  */
 const { extractDiscoveryInfoMock } = vi.hoisted(() => ({ extractDiscoveryInfoMock: vi.fn() }));
 vi.mock("@x402/extensions/bazaar", () => ({
@@ -18,12 +17,12 @@ vi.mock("@x402/extensions/bazaar", () => ({
 }));
 
 /**
- * `verifyResourceOwnership` makes a real outbound HTTP request — not
+ * `verifyResourceOwnership` makes a real outbound HTTP/MCP connection — not
  * something these hook-level tests should depend on network for. Mocked to
  * `"verified"` by default (preserving every pre-existing test's behavior,
  * since that's a pass-through), with a dedicated "resource-ownership
  * gating" describe block below overriding it to exercise the gating logic
- * itself. Its own SSRF hardening, live-402 matching, and fail-closed
+ * itself. Its own SSRF hardening, live-402/MCP matching, and fail-closed
  * behavior are `resource-ownership.test.ts`'s concern, not this file's.
  */
 const { verifyResourceOwnershipMock } = vi.hoisted(() => ({ verifyResourceOwnershipMock: vi.fn() }));
@@ -34,7 +33,6 @@ vi.mock("../src/resource-ownership.js", () => ({
 const {
   createBazaarCatalogingHook,
   createBazaarFailureHook,
-  createBazaarVerifyPreviewHook,
   createUsageTrackingHook,
   DEFAULT_MIN_SETTLED_AMOUNT_FOR_UNIQUE_BUYER_CREDIT,
   getBazaarExtensionStatus,
@@ -95,6 +93,15 @@ function catalogInputFromDiscovered() {
   };
 }
 
+function verifyContext(overrides: Partial<FacilitatorVerifyResultContext> = {}): FacilitatorVerifyResultContext {
+  return {
+    paymentPayload: payload(),
+    requirements: requirements(),
+    result: { isValid: true, payer: "GPAYER" },
+    ...overrides,
+  } as FacilitatorVerifyResultContext;
+}
+
 describe("discovery-hooks", () => {
   // One PGlite instance for the whole file — see the same rationale in
   // packages/discovery/test/catalog.test.ts.
@@ -115,11 +122,11 @@ describe("discovery-hooks", () => {
     verifyResourceOwnershipMock.mockResolvedValue({ outcome: "verified" });
   });
 
-  describe("createBazaarVerifyPreviewHook (onAfterVerify)", () => {
-    it("catalogs a well-formed extension as provisional, with a future expiry", async () => {
+  describe("createBazaarCatalogingHook (onAfterVerify)", () => {
+    it("catalogs a well-formed extension immediately, gated on independent verification", async () => {
       extractDiscoveryInfoMock.mockReturnValue(discoveredResource);
       const p = payload();
-      await createBazaarVerifyPreviewHook(catalog)({
+      await createBazaarCatalogingHook(catalog)({
         paymentPayload: p,
         requirements: requirements(),
         result: { isValid: true, payer: "GPAYER" },
@@ -127,14 +134,14 @@ describe("discovery-hooks", () => {
 
       const resources = (await catalog.list()).resources;
       expect(resources).toHaveLength(1);
-      expect(resources[0].status).toBe("provisional");
-      expect(new Date(resources[0].provisionalExpiresAt!).getTime()).toBeGreaterThan(Date.now());
-      expect(getBazaarExtensionStatus(p)).toEqual({ status: "processing" });
+      expect(resources[0].lastVerifiedAt).toBeTruthy();
+      expect(verifyResourceOwnershipMock).toHaveBeenCalledTimes(1);
+      expect(getBazaarExtensionStatus(p)).toEqual({ status: "success" });
     });
 
     it("does nothing when verification failed", async () => {
       const p = payload();
-      await createBazaarVerifyPreviewHook(catalog)({
+      await createBazaarCatalogingHook(catalog)({
         paymentPayload: p,
         requirements: requirements(),
         result: { isValid: false, invalidReason: "bad_signature" },
@@ -148,168 +155,31 @@ describe("discovery-hooks", () => {
     it("does nothing when no extension was declared", async () => {
       extractDiscoveryInfoMock.mockReturnValue(undefined);
       const p = payload();
-      await createBazaarVerifyPreviewHook(catalog)({
-        paymentPayload: p,
-        requirements: requirements(),
-        result: { isValid: true, payer: "GPAYER" },
-      } as FacilitatorVerifyResultContext);
+      await createBazaarCatalogingHook(catalog)(verifyContext({ paymentPayload: p }));
 
       expect(getBazaarExtensionStatus(p)).toBeUndefined();
       expect((await catalog.list()).resources).toHaveLength(0);
     });
-  });
 
-  describe("createBazaarCatalogingHook (onAfterSettle)", () => {
-    it("catalogs a well-formed extension as confirmed after a successful settlement", async () => {
+    it("catalogs what the client accepted (the advertised ceiling), not a settle-phase override — cataloging never sees settle-phase context at all", async () => {
       extractDiscoveryInfoMock.mockReturnValue(discoveredResource);
-      const p = payload();
-      await createBazaarCatalogingHook(catalog)({
-        paymentPayload: p,
-        requirements: requirements(),
-        result: { success: true, transaction: "abc123", network: "stellar:testnet", payer: "GPAYER" },
-      } as FacilitatorSettleResultContext);
-
-      const resources = (await catalog.list()).resources;
-      expect(resources).toHaveLength(1);
-      expect(resources[0].status).toBe("confirmed");
-      expect(getBazaarExtensionStatus(p)).toEqual({ status: "success" });
-    });
-
-    it("does not catalog when settlement failed, even with a well-formed extension", async () => {
-      extractDiscoveryInfoMock.mockReturnValue(discoveredResource);
-      const p = payload();
-      await createBazaarCatalogingHook(catalog)({
-        paymentPayload: p,
-        requirements: requirements(),
-        result: { success: false, transaction: "", network: "stellar:testnet", errorReason: "insufficient_funds" },
-      } as FacilitatorSettleResultContext);
-
-      expect((await catalog.list()).resources).toHaveLength(0);
-      expect(extractDiscoveryInfoMock).not.toHaveBeenCalled();
-    });
-
-    it("catalogs the advertised max, not the settle-phase actual charge, for upto", async () => {
-      // `upto` is phase-dependent: verify-time `requirements.amount` is the
-      // ceiling the client authorized (echoed unchanged as `paymentPayload.
-      // accepted`); settle-time `requirements.amount` is this one request's
-      // metered actual charge (`@x402/core`'s `settlePayment` builds it as
-      // `{ ...accepted, amount: <override> }`). Cataloging the latter would
-      // publish a one-off charge as the resource's advertised price.
-      extractDiscoveryInfoMock.mockReturnValue(discoveredResource);
-      const advertised = requirements(); // amount: "10000" stands in for the true ceiling
+      const advertised = requirements();
       advertised.scheme = "upto";
       advertised.amount = "500000"; // the true, client-authorized ceiling
       const p: PaymentPayload = { ...payload(), accepted: advertised };
-      const settlePhaseRequirements: PaymentRequirements = { ...advertised, amount: "80000" }; // this request's metered actual charge
 
-      await createBazaarCatalogingHook(catalog)({
-        paymentPayload: p,
-        requirements: settlePhaseRequirements,
-        result: { success: true, transaction: "abc123", network: "stellar:testnet", payer: "GPAYER", amount: "80000" },
-      } as FacilitatorSettleResultContext);
+      await createBazaarCatalogingHook(catalog)(
+        verifyContext({ paymentPayload: p, requirements: advertised }),
+      );
 
       const [resource] = (await catalog.list()).resources;
       expect(resource.accepts).toHaveLength(1);
       expect((resource.accepts[0] as PaymentRequirements).amount).toBe("500000");
       expect(extractDiscoveryInfoMock).toHaveBeenCalledWith(p, advertised, true);
     });
-
-    it("leaves nothing in the durable outbox after a normal, successful catalog write", async () => {
-      extractDiscoveryInfoMock.mockReturnValue(discoveredResource);
-      const p = payload();
-      await createBazaarCatalogingHook(catalog)({
-        paymentPayload: p,
-        requirements: requirements(),
-        result: { success: true, transaction: "abc123", network: "stellar:testnet", payer: "GPAYER" },
-      } as FacilitatorSettleResultContext);
-
-      expect(await catalog.listPending()).toEqual([]);
-    });
-
-    it("crash-safety: a pending outbox entry survives if the actual catalog upsert throws", async () => {
-      // Simulates the exact crash this outbox exists for (see "Automatic
-      // cataloging" in docs/architecture.md): something goes wrong between
-      // the durable enqueue and the upsert actually landing. The row must
-      // survive so packages/facilitator/src/indexer.ts can find and retry it
-      // later — proving the fix actually closes the gap, not just that the
-      // happy path still works.
-      extractDiscoveryInfoMock.mockReturnValue(discoveredResource);
-      const upsertSpy = vi.spyOn(catalog, "upsert").mockImplementation(() => {
-        throw new Error("simulated crash mid-write");
-      });
-      const p = payload();
-
-      await createBazaarCatalogingHook(catalog)({
-        paymentPayload: p,
-        requirements: requirements(),
-        result: { success: true, transaction: "crash-tx", network: "stellar:testnet", payer: "GPAYER" },
-      } as FacilitatorSettleResultContext);
-
-      upsertSpy.mockRestore();
-
-      const pending = await catalog.listPending();
-      expect(pending).toHaveLength(1);
-      expect(pending[0].transactionHash).toBe("crash-tx");
-      expect(getBazaarExtensionStatus(p)).toEqual({ status: "rejected", rejectedReason: "simulated crash mid-write" });
-
-      // A separate reconciler pass (what packages/facilitator/src/indexer.ts
-      // does) can now retry it independently, with upsert working normally again.
-      await catalog.upsert(pending[0].input, { status: "confirmed" });
-      await catalog.resolvePending(pending[0].transactionHash);
-      expect((await catalog.list()).resources).toHaveLength(1);
-      expect(await catalog.listPending()).toEqual([]);
-    });
-
-    it("promotes a provisional entry (from verify) to confirmed (at settle), clearing its expiry", async () => {
-      // The end-to-end lifecycle: a resource server's paid endpoint gets
-      // hit, /verify runs first (provisional, per the protocol
-      // trigger), then /settle runs (confirmed, permanent) for the same
-      // request — this is the protocol-aligned path replacing the old
-      // settlement-only trigger.
-      extractDiscoveryInfoMock.mockReturnValue(discoveredResource);
-      const p = payload();
-
-      await createBazaarVerifyPreviewHook(catalog)({
-        paymentPayload: p,
-        requirements: requirements(),
-        result: { isValid: true, payer: "GPAYER" },
-      } as FacilitatorVerifyResultContext);
-      expect((await catalog.list()).resources[0].status).toBe("provisional");
-
-      await createBazaarCatalogingHook(catalog)({
-        paymentPayload: p,
-        requirements: requirements(),
-        result: { success: true, transaction: "abc123", network: "stellar:testnet", payer: "GPAYER" },
-      } as FacilitatorSettleResultContext);
-
-      const resources = (await catalog.list()).resources;
-      expect(resources).toHaveLength(1); // same resource id, not duplicated
-      expect(resources[0].status).toBe("confirmed");
-      expect(resources[0].provisionalExpiresAt).toBeUndefined();
-    });
-
-    it("a verify-only flow (never settled) stays provisional, not permanently invisible nor permanently visible", async () => {
-      // Per protocol cataloging trigger (Section 3.2), a validated
-      // receipt catalogs the resource immediately — this is intentional,
-      // not a spam hole reopened: the entry is bounded-lifetime
-      // (`provisionalExpiresAt`) and packages/facilitator/src/indexer.ts
-      // evicts it if never confirmed. See catalog.test.ts's
-      // "evictExpiredProvisional" tests for the eviction mechanics.
-      extractDiscoveryInfoMock.mockReturnValue(discoveredResource);
-      const p = payload();
-      await createBazaarVerifyPreviewHook(catalog)({
-        paymentPayload: p,
-        requirements: requirements(),
-        result: { isValid: true, payer: "GPAYER" },
-      } as FacilitatorVerifyResultContext);
-
-      const resources = (await catalog.list()).resources;
-      expect(resources).toHaveLength(1);
-      expect(resources[0].status).toBe("provisional");
-    });
   });
 
-  describe("resource-ownership gating (onAfterSettle)", () => {
+  describe("resource-ownership gating (onAfterVerify)", () => {
     it("runs the ownership check for a brand-new resourceUrl and rejects cataloging on failure", async () => {
       extractDiscoveryInfoMock.mockReturnValue(discoveredResource);
       verifyResourceOwnershipMock.mockResolvedValue({
@@ -318,11 +188,7 @@ describe("discovery-hooks", () => {
       });
       const p = payload();
 
-      await createBazaarCatalogingHook(catalog)({
-        paymentPayload: p,
-        requirements: requirements(),
-        result: { success: true, transaction: "abc123", network: "stellar:testnet", payer: "GPAYER" },
-      } as FacilitatorSettleResultContext);
+      await createBazaarCatalogingHook(catalog)(verifyContext({ paymentPayload: p }));
 
       expect(verifyResourceOwnershipMock).toHaveBeenCalledTimes(1);
       expect((await catalog.list()).resources).toHaveLength(0);
@@ -336,50 +202,34 @@ describe("discovery-hooks", () => {
       extractDiscoveryInfoMock.mockReturnValue(discoveredResource);
       const p = payload();
 
-      await createBazaarCatalogingHook(catalog)({
-        paymentPayload: p,
-        requirements: requirements(),
-        result: { success: true, transaction: "abc123", network: "stellar:testnet", payer: "GPAYER" },
-      } as FacilitatorSettleResultContext);
+      await createBazaarCatalogingHook(catalog)(verifyContext({ paymentPayload: p }));
 
       expect(verifyResourceOwnershipMock).toHaveBeenCalledTimes(1);
       expect((await catalog.list()).resources).toHaveLength(1);
     });
 
-    it("skips the ownership check when an existing confirmed resource re-settles with the same payTo", async () => {
+    it("skips the ownership check when an already-cataloged resource re-submits with the same payTo", async () => {
       extractDiscoveryInfoMock.mockReturnValue(discoveredResource);
       const p1 = payload();
-      await createBazaarCatalogingHook(catalog)({
-        paymentPayload: p1,
-        requirements: requirements(),
-        result: { success: true, transaction: "tx1", network: "stellar:testnet", payer: "GPAYER" },
-      } as FacilitatorSettleResultContext);
+      await createBazaarCatalogingHook(catalog)(verifyContext({ paymentPayload: p1 }));
       expect(verifyResourceOwnershipMock).toHaveBeenCalledTimes(1);
 
-      // Second settlement for the same resourceUrl, same payTo — no reason
-      // to pay the cost of another live fetch; nothing about "who gets
-      // paid" is changing.
+      // Second receipt for the same resourceUrl, same payTo — no reason to
+      // pay the cost of another live check; nothing about "who gets paid"
+      // is changing.
       const p2 = payload();
-      await createBazaarCatalogingHook(catalog)({
-        paymentPayload: p2,
-        requirements: requirements(),
-        result: { success: true, transaction: "tx2", network: "stellar:testnet", payer: "GPAYER" },
-      } as FacilitatorSettleResultContext);
+      await createBazaarCatalogingHook(catalog)(verifyContext({ paymentPayload: p2 }));
 
       expect(verifyResourceOwnershipMock).toHaveBeenCalledTimes(1); // still just once
       expect(getBazaarExtensionStatus(p2)).toEqual({ status: "success" });
     });
 
-    it("re-verifies (and can reject) when a settlement would change an existing resource's payTo", async () => {
+    it("re-verifies (and can reject) when a new receipt would change an existing resource's payTo", async () => {
       // This is the actual squatting/impersonation shape: same resourceUrl,
       // a different payTo trying to overwrite the real one.
       extractDiscoveryInfoMock.mockReturnValue(discoveredResource);
       const p1 = payload();
-      await createBazaarCatalogingHook(catalog)({
-        paymentPayload: p1,
-        requirements: requirements(),
-        result: { success: true, transaction: "tx1", network: "stellar:testnet", payer: "GPAYER" },
-      } as FacilitatorSettleResultContext);
+      await createBazaarCatalogingHook(catalog)(verifyContext({ paymentPayload: p1 }));
 
       verifyResourceOwnershipMock.mockResolvedValue({
         outcome: "failed",
@@ -388,11 +238,9 @@ describe("discovery-hooks", () => {
       const hijackRequirements = { ...requirements(), payTo: "GATTACKER00000000000000000000000000000000000000000000000" };
       const p2: PaymentPayload = { ...payload(), accepted: hijackRequirements };
 
-      await createBazaarCatalogingHook(catalog)({
-        paymentPayload: p2,
-        requirements: hijackRequirements,
-        result: { success: true, transaction: "tx2", network: "stellar:testnet", payer: "GATTACKER" },
-      } as FacilitatorSettleResultContext);
+      await createBazaarCatalogingHook(catalog)(
+        verifyContext({ paymentPayload: p2, requirements: hijackRequirements, result: { isValid: true, payer: "GATTACKER" } }),
+      );
 
       expect(verifyResourceOwnershipMock).toHaveBeenCalledTimes(2);
       const resources = (await catalog.list()).resources;
@@ -408,7 +256,7 @@ describe("discovery-hooks", () => {
   describe("createUsageTrackingHook (onAfterSettle)", () => {
     it("records usage against a resource that was already cataloged", async () => {
       extractDiscoveryInfoMock.mockReturnValue(discoveredResource);
-      await catalog.upsert(catalogInputFromDiscovered(), { status: "confirmed" });
+      await catalog.upsert(catalogInputFromDiscovered(), { lastVerifiedAt: new Date().toISOString() });
       const recordUsageSpy = vi.spyOn(catalog, "recordUsage");
       const p = payload();
 
@@ -456,10 +304,10 @@ describe("discovery-hooks", () => {
     });
 
     it("does nothing (and does not throw) when the resource was never actually cataloged", async () => {
-      // Simulates cataloging having been rejected this round (e.g. by the
-      // resource-ownership check) — recordUsage's foreign key would reject
-      // an id that isn't in `resources`, so this must be caught before that,
-      // not surfaced as an error.
+      // Simulates cataloging having been rejected at verify-time (e.g. by
+      // the resource-ownership check) — recordUsage's foreign key would
+      // reject an id that isn't in `resources`, so this must be caught
+      // before that, not surfaced as an error.
       extractDiscoveryInfoMock.mockReturnValue(discoveredResource);
       const recordUsageSpy = vi.spyOn(catalog, "recordUsage");
 
@@ -477,7 +325,7 @@ describe("discovery-hooks", () => {
 
     it("does nothing when the settlement result has no payer", async () => {
       extractDiscoveryInfoMock.mockReturnValue(discoveredResource);
-      await catalog.upsert(catalogInputFromDiscovered(), { status: "confirmed" });
+      await catalog.upsert(catalogInputFromDiscovered(), { lastVerifiedAt: new Date().toISOString() });
       const recordUsageSpy = vi.spyOn(catalog, "recordUsage");
 
       await createUsageTrackingHook(catalog)({
@@ -492,7 +340,7 @@ describe("discovery-hooks", () => {
 
     it("uses a per-seller threshold function when provided", async () => {
       extractDiscoveryInfoMock.mockReturnValue(discoveredResource);
-      await catalog.upsert(catalogInputFromDiscovered(), { status: "confirmed" });
+      await catalog.upsert(catalogInputFromDiscovered(), { lastVerifiedAt: new Date().toISOString() });
       const recordUsageSpy = vi.spyOn(catalog, "recordUsage");
       const thresholdFn = vi.fn().mockReturnValue(5000n);
 
@@ -509,17 +357,13 @@ describe("discovery-hooks", () => {
 
     it("logs and swallows a recordUsage failure without affecting the reported cataloging outcome", async () => {
       // The exact isolation createUsageTrackingHook's doc comment promises:
-      // run right after a real, successful cataloging pass, confirm a
-      // usage-write failure never retroactively marks that settlement as
-      // rejected.
+      // run right after a real, successful cataloging pass (at verify-time),
+      // confirm a usage-write failure (at settle-time) never retroactively
+      // marks that cataloging as rejected.
       extractDiscoveryInfoMock.mockReturnValue(discoveredResource);
       const p = payload();
 
-      await createBazaarCatalogingHook(catalog)({
-        paymentPayload: p,
-        requirements: requirements(),
-        result: { success: true, transaction: "abc123", network: "stellar:testnet", payer: "GPAYER" },
-      } as FacilitatorSettleResultContext);
+      await createBazaarCatalogingHook(catalog)(verifyContext({ paymentPayload: p }));
       expect(getBazaarExtensionStatus(p)).toEqual({ status: "success" });
 
       const recordUsageSpy = vi.spyOn(catalog, "recordUsage").mockImplementation(() => {

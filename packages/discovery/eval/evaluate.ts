@@ -67,7 +67,7 @@ async function main(): Promise<void> {
 
   console.log(`Loading ${resourcesFixture.length} seed resources...`);
   for (const resource of resourcesFixture as DiscoveredResourceInput[]) {
-    await catalog.upsert(resource, { status: "confirmed" });
+    await catalog.upsert(resource, { lastVerifiedAt: new Date().toISOString() });
   }
 
   const queries = queriesFixture as LabeledQuery[];

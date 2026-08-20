@@ -18,6 +18,9 @@ function sampleCommitment(): UptoWitnessCommitment {
     maxAmount: 1_000_000n,
     requestNonce: 1n,
     deadline: BigInt(Math.floor(Date.now() / 1000) + 300),
+    feeBps: 0,
+    feeFixed: 0n,
+    feeMode: 0,
   };
 }
 

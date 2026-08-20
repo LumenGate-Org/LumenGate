@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { BazaarCatalog } from "../src/catalog.js";
 import type { DiscoveredResourceInput, UpsertOptions } from "../src/types.js";
 
-const CONFIRMED: UpsertOptions = { status: "confirmed" };
+const CONFIRMED: UpsertOptions = { lastVerifiedAt: new Date().toISOString() };
 
 function httpResource(overrides: Partial<DiscoveredResourceInput> = {}): DiscoveredResourceInput {
   return {
@@ -47,7 +47,7 @@ describe("BazaarCatalog", () => {
     const result = await catalog.list();
     expect(result.resources).toHaveLength(1);
     expect(result.resources[0].resourceUrl).toBe("https://api.example.com/weather");
-    expect(result.resources[0].status).toBe("confirmed");
+    expect(result.resources[0].lastVerifiedAt).toBe(CONFIRMED.lastVerifiedAt);
     expect(result.pagination.total).toBe(1);
   });
 
@@ -291,69 +291,79 @@ describe("BazaarCatalog", () => {
     });
   });
 
-  describe("automatic cataloging: provisional and confirmed status", () => {
-    it("upserts as provisional with a future expiry", async () => {
-      const expiresAt = new Date(Date.now() + 60_000).toISOString();
-      const record = await catalog.upsert(httpResource(), { status: "provisional", provisionalExpiresAt: expiresAt });
-      expect(record.status).toBe("provisional");
-      expect(record.provisionalExpiresAt).toBe(expiresAt);
+  describe("automatic cataloging: verification-gated indexing, no provisional stage", () => {
+    it("upsert records the verification timestamp it's given", async () => {
+      const verifiedAt = new Date().toISOString();
+      const record = await catalog.upsert(httpResource(), { lastVerifiedAt: verifiedAt });
+      expect(record.lastVerifiedAt).toBe(verifiedAt);
     });
 
-    it("a provisional entry is visible in list/search immediately, matching the protocol requirements's literal 'catalogs on receipt' trigger", async () => {
-      await catalog.upsert(httpResource(), {
-        status: "provisional",
-        provisionalExpiresAt: new Date(Date.now() + 60_000).toISOString(),
-      });
+    it("a resource is visible in list/search immediately once upserted — cataloging itself is the only gate, matching the protocol's literal 'catalogs on receipt' trigger; independent verification happens before upsert is ever called, in the facilitator's cataloging hook, not inside this class", async () => {
+      await catalog.upsert(httpResource(), CONFIRMED);
       expect((await catalog.list()).resources).toHaveLength(1);
       expect((await catalog.search({ query: "weather" })).resources).toHaveLength(1);
     });
 
-    it("promoting to confirmed clears the expiry", async () => {
-      await catalog.upsert(httpResource(), {
-        status: "provisional",
-        provisionalExpiresAt: new Date(Date.now() + 60_000).toISOString(),
-      });
-      const confirmed = await catalog.upsert(httpResource(), CONFIRMED);
-      expect(confirmed.status).toBe("confirmed");
-      expect(confirmed.provisionalExpiresAt).toBeUndefined();
-      const result = await catalog.list();
-      expect(result.resources[0].status).toBe("confirmed");
+    it("re-upserting an existing resource refreshes lastVerifiedAt", async () => {
+      const first = new Date(Date.now() - 60_000).toISOString();
+      await catalog.upsert(httpResource(), { lastVerifiedAt: first });
+      const second = new Date().toISOString();
+      const updated = await catalog.upsert(httpResource(), { lastVerifiedAt: second });
+      expect(updated.lastVerifiedAt).toBe(second);
     });
 
-    it("evictExpiredProvisional removes only expired provisional entries, not confirmed or not-yet-expired ones", async () => {
-      await catalog.upsert(httpResource({ resourceUrl: "https://api.example.com/expired" }), {
-        status: "provisional",
-        provisionalExpiresAt: new Date(Date.now() - 1_000).toISOString(), // already expired
+    it("listStaleForReverification returns only entries older than the threshold, oldest first", async () => {
+      await catalog.upsert(httpResource({ resourceUrl: "https://api.example.com/stale" }), {
+        lastVerifiedAt: new Date(Date.now() - 120_000).toISOString(),
       });
-      await catalog.upsert(httpResource({ resourceUrl: "https://api.example.com/still-fresh" }), {
-        status: "provisional",
-        provisionalExpiresAt: new Date(Date.now() + 60_000).toISOString(),
+      await catalog.upsert(httpResource({ resourceUrl: "https://api.example.com/very-stale" }), {
+        lastVerifiedAt: new Date(Date.now() - 180_000).toISOString(),
       });
-      await catalog.upsert(httpResource({ resourceUrl: "https://api.example.com/confirmed" }), CONFIRMED);
+      await catalog.upsert(httpResource({ resourceUrl: "https://api.example.com/fresh" }), {
+        lastVerifiedAt: new Date().toISOString(),
+      });
 
-      const evicted = await catalog.evictExpiredProvisional();
-      expect(evicted).toBe(1);
-
-      const result = await catalog.list();
-      const remaining = result.resources.map(r => r.resourceUrl).sort();
-      expect(remaining).toEqual([
-        "https://api.example.com/confirmed",
-        "https://api.example.com/still-fresh",
+      const stale = await catalog.listStaleForReverification(60_000);
+      expect(stale.map(r => r.resourceUrl)).toEqual([
+        "https://api.example.com/very-stale",
+        "https://api.example.com/stale",
       ]);
     });
 
-    it("an evicted provisional entry no longer appears in search either", async () => {
-      await catalog.upsert(httpResource(), {
-        status: "provisional",
-        provisionalExpiresAt: new Date(Date.now() - 1_000).toISOString(),
+    it("listStaleForReverification respects its limit", async () => {
+      await catalog.upsert(httpResource({ resourceUrl: "https://api.example.com/a" }), {
+        lastVerifiedAt: new Date(Date.now() - 120_000).toISOString(),
       });
-      await catalog.evictExpiredProvisional();
-      expect((await catalog.search({ query: "weather" })).resources).toHaveLength(0);
+      await catalog.upsert(httpResource({ resourceUrl: "https://api.example.com/b" }), {
+        lastVerifiedAt: new Date(Date.now() - 120_000).toISOString(),
+      });
+      const stale = await catalog.listStaleForReverification(60_000, 1);
+      expect(stale).toHaveLength(1);
     });
 
-    it("evictExpiredProvisional is a no-op when nothing has expired", async () => {
+    it("markVerified refreshes lastVerifiedAt without touching other fields", async () => {
+      await catalog.upsert(httpResource(), { lastVerifiedAt: new Date(Date.now() - 120_000).toISOString() });
+      const id = (await catalog.list()).resources[0].id;
+      const before = (await catalog.getById(id))!;
+
+      const newTimestamp = new Date().toISOString();
+      await catalog.markVerified(id, newTimestamp);
+
+      const after = (await catalog.getById(id))!;
+      expect(after.lastVerifiedAt).toBe(newTimestamp);
+      expect(after.description).toBe(before.description);
+      expect(after.payTo).toBe(before.payTo);
+    });
+
+    it("remove deletes a cataloged resource outright", async () => {
       await catalog.upsert(httpResource(), CONFIRMED);
-      expect(await catalog.evictExpiredProvisional()).toBe(0);
+      const id = (await catalog.list()).resources[0].id;
+
+      await catalog.remove(id);
+
+      expect(await catalog.getById(id)).toBeUndefined();
+      expect((await catalog.list()).resources).toHaveLength(0);
+      expect((await catalog.search({ query: "weather" })).resources).toHaveLength(0);
     });
   });
 
@@ -676,53 +686,4 @@ describe("BazaarCatalog", () => {
     });
   });
 
-  describe("pending_catalog durable outbox (crash-safe cataloging)", () => {
-    it("starts empty", async () => {
-      expect(await catalog.listPending()).toEqual([]);
-    });
-
-    it("lists an enqueued entry until it is resolved", async () => {
-      const input = httpResource();
-      await catalog.enqueuePending("txhash1", input);
-
-      const pending = await catalog.listPending();
-      expect(pending).toHaveLength(1);
-      expect(pending[0].transactionHash).toBe("txhash1");
-      expect(pending[0].input.resourceUrl).toBe(input.resourceUrl);
-
-      await catalog.resolvePending("txhash1");
-      expect(await catalog.listPending()).toEqual([]);
-    });
-
-    it("survives independently of whether the resource was ever actually cataloged", async () => {
-      // Simulates the exact crash this outbox exists for: enqueue succeeds,
-      // then the process dies before `upsert` (or before `resolvePending`)
-      // ever runs — the pending row must still be there for a separate
-      // reconciler to find, regardless of catalog state.
-      await catalog.enqueuePending("txhash-crash", httpResource());
-      expect((await catalog.list()).resources).toHaveLength(0);
-      expect(await catalog.listPending()).toHaveLength(1);
-    });
-
-    it("resolvePending is a no-op for an unknown transaction hash", async () => {
-      await expect(catalog.resolvePending("never-enqueued")).resolves.not.toThrow();
-    });
-
-    it("re-enqueuing the same transaction hash overwrites the pending payload rather than duplicating it", async () => {
-      await catalog.enqueuePending("txhash2", httpResource({ description: "first" }));
-      await catalog.enqueuePending("txhash2", httpResource({ description: "second" }));
-
-      const pending = await catalog.listPending();
-      expect(pending).toHaveLength(1);
-      expect(pending[0].input.description).toBe("second");
-    });
-
-    it("lists pending entries oldest-enqueued first", async () => {
-      await catalog.enqueuePending("tx-a", httpResource({ resourceUrl: "https://a.example.com" }));
-      await catalog.enqueuePending("tx-b", httpResource({ resourceUrl: "https://b.example.com" }));
-
-      const pending = await catalog.listPending();
-      expect(pending.map(p => p.transactionHash)).toEqual(["tx-a", "tx-b"]);
-    });
-  });
 });

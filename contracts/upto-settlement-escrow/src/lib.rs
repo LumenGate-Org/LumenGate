@@ -77,11 +77,34 @@ use soroban_sdk::{
     Env, IntoVal, Val,
 };
 
-/// Hard ceiling on `fee_bps`, independent of any off-chain facilitator
-/// configuration. 2000 = 20%. Mirrors Design A's `MAX_FEE_BPS` exactly, for
-/// a fair comparison — this isn't a place the two designs should differ.
+/// Hard ceiling on the *effective* facilitator fee, expressed as a
+/// percentage of `actual_amount`, independent of any off-chain facilitator
+/// configuration and independent of which `fee_mode` computed it. 2000 =
+/// 20%. Mirrors Design A's `MAX_FEE_BPS` exactly, for a fair comparison —
+/// this isn't a place the two designs should differ.
 const MAX_FEE_BPS: u32 = 2_000;
 const BPS_DENOMINATOR: i128 = 10_000;
+
+/// Selects how `fee_bps`/`fee_fixed` combine into the effective facilitator
+/// fee, mirroring `BillingFeeConfig`'s off-chain shape
+/// (`packages/facilitator/src/billing.ts`) so the same configurable
+/// fixed/percentage/combined business model applies on-chain, not only to
+/// the off-chain-billed tiers. `fee_fixed` is denominated in the
+/// settlement asset's own atomic units (not USD) specifically so this
+/// contract never needs a price oracle to compute it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum FeeMode {
+    /// `fee = actual_amount * fee_bps / 10_000`. `fee_fixed` is ignored.
+    Percentage = 0,
+    /// `fee = fee_fixed`, a flat amount in the settlement asset's atomic
+    /// units. `fee_bps` is ignored.
+    Fixed = 1,
+    /// `fee = min(fee_fixed, actual_amount * fee_bps / 10_000)`.
+    CombinedMin = 2,
+    /// `fee = max(fee_fixed, actual_amount * fee_bps / 10_000)`.
+    CombinedMax = 3,
+}
 
 /// Emitted on every non-zero-`max_amount` settlement. Unlike Design A's
 /// event, there is no `DataKey` this maps to — this event, plus the
@@ -111,6 +134,7 @@ pub enum Error {
     FeeExceedsCeiling = 5,
     FacilitatorIsPayer = 6,
     FacilitatorIsPayTo = 7,
+    InvalidFeeMode = 8,
 }
 
 #[contract]
@@ -142,7 +166,16 @@ impl UptoEscrowSettlement {
         request_nonce: u64,
         deadline: u64,
         fee_bps: u32,
+        fee_fixed: i128,
+        fee_mode: u32,
     ) -> (i128, i128, i128) {
+        let fee_mode = match fee_mode {
+            0 => FeeMode::Percentage,
+            1 => FeeMode::Fixed,
+            2 => FeeMode::CombinedMin,
+            3 => FeeMode::CombinedMax,
+            _ => panic_with_error!(&env, Error::InvalidFeeMode),
+        };
         // --- Facilitator safety: cannot be the payer or the payee it is
         // supposedly routing funds to; mirrors Design A's equivalent checks. ---
         if facilitator == from {
@@ -156,13 +189,33 @@ impl UptoEscrowSettlement {
         if env.ledger().timestamp() > deadline {
             panic_with_error!(&env, Error::DeadlineExpired);
         }
-        if actual_amount < 0 || max_amount < 0 {
+        if actual_amount < 0 || max_amount < 0 || fee_fixed < 0 {
             panic_with_error!(&env, Error::NegativeAmount);
         }
         if actual_amount > max_amount {
             panic_with_error!(&env, Error::ActualExceedsMax);
         }
-        if fee_bps > MAX_FEE_BPS {
+
+        // --- Effective fee, computed from fee_mode/fee_bps/fee_fixed
+        // (mirrors BillingFeeConfig's fixed/percentage/combined shape,
+        // packages/facilitator/src/billing.ts), then bounded by MAX_FEE_BPS
+        // as a percentage of actual_amount regardless of which mode
+        // produced it — this is what keeps the on-chain ceiling meaningful
+        // even in Fixed/CombinedMax mode, where an arbitrarily large
+        // fee_fixed would otherwise bypass a bps-only check. ---
+        let percentage_component = (actual_amount * fee_bps as i128) / BPS_DENOMINATOR;
+        let fee = match fee_mode {
+            FeeMode::Percentage => percentage_component,
+            FeeMode::Fixed => fee_fixed,
+            FeeMode::CombinedMin => {
+                if fee_fixed < percentage_component { fee_fixed } else { percentage_component }
+            }
+            FeeMode::CombinedMax => {
+                if fee_fixed > percentage_component { fee_fixed } else { percentage_component }
+            }
+        };
+        let fee_ceiling = (actual_amount * MAX_FEE_BPS as i128) / BPS_DENOMINATOR;
+        if fee > fee_ceiling {
             panic_with_error!(&env, Error::FeeExceedsCeiling);
         }
 
@@ -183,6 +236,8 @@ impl UptoEscrowSettlement {
             request_nonce.into_val(&env),
             deadline.into_val(&env),
             fee_bps.into_val(&env),
+            fee_fixed.into_val(&env),
+            (fee_mode as u32).into_val(&env),
         ];
         from.require_auth_for_args(witness_args);
 
@@ -210,12 +265,12 @@ impl UptoEscrowSettlement {
         }
 
         // --- Fee split + refund, all still within this same atomic call.
-        // Paying out of `this_contract` self-authorizes (a contract's own
-        // `require_auth()` succeeds automatically when it is the currently
-        // executing contract) — no additional signature needed, identical
-        // to how Design A's `transfer_from(spender = this_contract, ...)`
+        // `fee` was already computed and bounded above. Paying out of
+        // `this_contract` self-authorizes (a contract's own `require_auth()`
+        // succeeds automatically when it is the currently executing
+        // contract) — no additional signature needed, identical to how
+        // Design A's `transfer_from(spender = this_contract, ...)`
         // self-authorizes. ---
-        let fee = (actual_amount * fee_bps as i128) / BPS_DENOMINATOR;
         let seller_amount = actual_amount - fee;
         let refund = max_amount - actual_amount;
 

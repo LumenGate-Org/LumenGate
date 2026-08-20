@@ -5,12 +5,7 @@ import type {
   FacilitatorVerifyResultContext,
 } from "@x402/core/facilitator";
 import type { PaymentPayload, PaymentRequirements } from "@x402/core/types";
-import {
-  BazaarCatalog,
-  DEFAULT_PROVISIONAL_TTL_MS,
-  resourceId,
-  type BazaarExtensionStatus,
-} from "@x402-stellar/discovery";
+import { BazaarCatalog, resourceId, type BazaarExtensionStatus } from "@x402-stellar/discovery";
 import { verifyResourceOwnership } from "./resource-ownership.js";
 
 /**
@@ -90,34 +85,45 @@ function extractCatalogInput(paymentPayload: PaymentPayload) {
 
 /**
  * Builds the `onAfterVerify` hook that catalogs a client-declared Bazaar
- * extension with `status: "provisional"` — protocol cataloging
- * trigger (Section 3.2: "When the facilitator receives a PaymentPayload
- * carrying the discovery extension, it validates `info` against the
- * supplied `schema` and catalogs the resource with no separate registration
- * step"), which ties cataloging to a *validated payload receipt*, not
- * settlement.
+ * extension — the protocol's literal cataloging trigger (Section 3.2:
+ * "When the facilitator receives a PaymentPayload carrying the discovery
+ * extension, it validates `info` against the supplied `schema` and catalogs
+ * the resource with no separate registration step"), which ties cataloging
+ * to a *validated payload receipt*, not settlement. Settlement is not the
+ * cataloging trigger.
  *
- * This project's earlier design gated cataloging entirely on settlement,
- * for a real reason: `verify()` never moves funds or submits anything
- * on-chain, so cataloging unconditionally here once let anyone with a
- * validly-signed-but-never-settled payment authorization (costless against
- * a self-controlled token) inject arbitrary resource metadata into the
- * search index for free, repeatedly. That reasoning wasn't wrong, but it
- * also wasn't what protocol requirements describes, and protocol requirements
- * catalog-integrity defense (Section 3.2: soft-drop validation, strict
- * `routeTemplate` handling) is about validating *content*, not gating on
- * settlement. `status: "provisional"` reconciles both: the resource is
- * cataloged immediately, matching the protocol trigger, but only
- * visible for `DEFAULT_PROVISIONAL_TTL_MS` unless `createBazaarCatalogingHook`
- * promotes it to `"confirmed"` first — bounding, rather than eliminating,
- * the free-spam window a settlement-blind trigger otherwise has no defense
- * against. See "Automatic cataloging: provisional at receipt, confirmed at
- * settlement" in docs/architecture.md for the full rationale.
+ * **Before indexing, the resource's actual payment information is
+ * independently verified against its live source** —
+ * `verifyResourceOwnership` re-fetches the resource's own live 402 (HTTP)
+ * or connects to its live MCP server and confirms the declared tool exists
+ * (MCP) — not just accepted from what the client submitted. This closes the
+ * gap an earlier version of this project had: gating cataloging on
+ * settlement to keep a costless, validly-signed-but-never-settled payment
+ * authorization from injecting arbitrary metadata into the search index for
+ * free — a real concern, but not what the protocol describes, and not the
+ * right fix for it either, since the protocol's own catalog-integrity
+ * defense (Section 3.2: soft-drop validation, strict `routeTemplate`
+ * handling) is about validating *content*, not gating on settlement. Nothing
+ * is indexed until independent verification passes, so there is no
+ * unverified-but-visible window to bound with a TTL — Bazaar does not rely
+ * on client-supplied discovery metadata alone at any point a listing is
+ * visible.
+ *
+ * Re-verification is skipped only when this specific write wouldn't change
+ * who an already-cataloged resource says it pays — a resource re-submitting
+ * the same `payTo` it already has doesn't need a fresh outbound check on
+ * every single request; a brand-new resource, or one whose `payTo` is about
+ * to change, always gets checked. Cataloged resources are also periodically
+ * re-verified independently of any particular buyer's request — see
+ * `packages/facilitator/src/indexer.ts` and
+ * `BazaarCatalog.listStaleForReverification` — so pricing/payTo drift is
+ * caught even for a resource nobody has resubmitted discovery metadata for
+ * recently.
  *
  * @param catalog - The Bazaar catalog to write discovered resources into
  * @returns An `onAfterVerify` hook suitable for `x402Facilitator`
  */
-export function createBazaarVerifyPreviewHook(catalog: BazaarCatalog) {
+export function createBazaarCatalogingHook(catalog: BazaarCatalog) {
   return async (context: FacilitatorVerifyResultContext): Promise<void> => {
     if (!context.result.isValid) return;
 
@@ -128,71 +134,6 @@ export function createBazaarVerifyPreviewHook(catalog: BazaarCatalog) {
         return;
       }
 
-      await catalog.upsert(catalogInput, {
-        status: "provisional",
-        provisionalExpiresAt: new Date(Date.now() + DEFAULT_PROVISIONAL_TTL_MS).toISOString(),
-      });
-
-      lastExtensionStatus.set(context.paymentPayload, { status: "processing" });
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      console.warn(`Bazaar extension validation failed: ${reason}`);
-      lastExtensionStatus.set(context.paymentPayload, { status: "rejected", rejectedReason: reason });
-    }
-  };
-}
-
-/**
- * Builds the `onAfterSettle` hook that promotes a resource's catalog entry
- * to `status: "confirmed"` — gated on `context.result.success`, so
- * promotion (and the resulting permanent, non-expiring visibility) only
- * happens once a real settlement (funds actually moved, or the `upto`
- * zero-amount case which still finalizes on-chain) has happened, not merely
- * on a costless `verify()`. See `createBazaarVerifyPreviewHook` for the
- * provisional-at-receipt half of this and why both halves are needed.
- *
- * For a direct caller of this facilitator's own public `/settle` route
- * (bypassing the upstream `@x402/express` deep-equality check),
- * `accepted` is cross-checked against the witness commitment directly —
- * `UptoStellarScheme._verify` binds
- * `accepted.payTo`/`asset`/`extra.feeBps`/`extra.settlementContract`/
- * `extra.facilitatorAddress`/`amount`, not just settle-phase
- * `requirements`'s — closing the direct-caller version of "publish
- * fabricated economics for a real, settled resource"
- * (`packages/stellar-upto/src/facilitator/scheme.ts`). That check alone
- * wasn't sufficient, though: `UptoStellarScheme.settle()` has its own
- * idempotency cache, and a *cache hit* skips `_verify` entirely — so a
- * replay carrying the same witness+amount but a mutated `accepted` used to
- * ride a prior real settlement's cached `success: true` straight past
- * validation. Fixed by widening the cache key to fingerprint the entire
- * request, not just the witness and amount, so a cache hit can now only
- * ever replay a byte-identical request (see `computeSettlementCacheKey`).
- * The residual that's left, and is *accepted* rather than fixed: any
- * witness holder can still choose which real (unmutated) settlement to
- * trigger via this public route at all — see "public `/settle`" in
- * `docs/architecture.md`.
- *
- * @param catalog - The Bazaar catalog to write discovered resources into
- * @returns An `onAfterSettle` hook suitable for `x402Facilitator`
- */
-export function createBazaarCatalogingHook(catalog: BazaarCatalog) {
-  return async (context: FacilitatorSettleResultContext): Promise<void> => {
-    if (!context.result.success) return;
-
-    try {
-      const catalogInput = extractCatalogInput(context.paymentPayload);
-      if (!catalogInput) {
-        // Not an error: the client simply didn't echo a bazaar extension.
-        return;
-      }
-
-      // Re-verify ownership only when this settlement would actually change
-      // who a cataloged URL says it pays — a resource re-confirming the same
-      // payTo it already has doesn't need a fresh outbound fetch on every
-      // single settlement; a brand-new URL, or an existing one whose payTo
-      // is about to change, is exactly the URL-squatting/impersonation
-      // signature `verifyResourceOwnership` exists to catch. See
-      // `resource-ownership.ts` for the full threat this closes.
       const existing = await catalog.getById(resourceId(catalogInput));
       if (!existing || existing.payTo !== catalogInput.payTo) {
         const ownership = await verifyResourceOwnership(catalogInput);
@@ -204,21 +145,7 @@ export function createBazaarCatalogingHook(catalog: BazaarCatalog) {
         }
       }
 
-      // Durable-outbox pattern (see "pending_catalog" in
-      // packages/discovery/src/catalog.ts): write the full catalog payload
-      // to disk, keyed by this settlement's transaction hash, BEFORE
-      // attempting the actual upsert. If the process dies between here and
-      // `resolvePending` below — the crash window this closes — the row
-      // survives and packages/facilitator/src/indexer.ts can find and retry
-      // it independently, instead of that resource staying permanently
-      // un-confirmed with nothing left to notice. Only possible when a real
-      // transaction hash exists (always true for a successful settlement).
-      const transactionHash = context.result.transaction;
-      if (transactionHash) await catalog.enqueuePending(transactionHash, catalogInput);
-
-      await catalog.upsert(catalogInput, { status: "confirmed" });
-
-      if (transactionHash) await catalog.resolvePending(transactionHash);
+      await catalog.upsert(catalogInput, { lastVerifiedAt: new Date().toISOString() });
 
       lastExtensionStatus.set(context.paymentPayload, { status: "success" });
     } catch (error) {

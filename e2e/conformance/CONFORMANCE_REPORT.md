@@ -1299,12 +1299,15 @@ stays scoped to that period even if the seller's plan later changes).
 Whether the same fixed/percentage/combined shape could extend to
 managed-`upto`'s **on-chain** fee is a separate question with a real
 architectural answer, not a follow-up implementation task — see
-`docs/architecture.md`, "Technical assessment: can the off-chain
-fixed/percentage/combined model extend on-chain?" A flat, USD-denominated
+`docs/architecture.md`, "Technical assessment: how the off-chain
+fixed/percentage/combined model extends on-chain." A flat, USD-denominated
 fee component has no cheap on-chain equivalent for an arbitrary SEP-41
 settlement asset without either a second token transfer or a price oracle
 this project has not integrated; the on-chain fee stays percentage-only by
-deliberate design, not by omission.
+deliberate design, not by omission. (Superseded by Round eleven, which
+extends the on-chain fee to the same fixed/percentage/combined model using
+the settlement asset's own atomic units in place of a USD-denominated
+fixed component — see below.)
 
 **Full regression suite after this round**: `packages/stellar-upto`
 typecheck clean, 83/83 tests passing (up from 61); `packages/facilitator`
@@ -1740,6 +1743,121 @@ explicitly kept the code, the tests, and the eval harness, and flagged one
 concrete follow-up (gating usage's influence on a minimum multi-day
 activity bar, to blunt the exact failure mode this round measured) as
 future work, not a blocker.
+
+## Round eleven: external review pass — fee model, cataloging integrity, and doc/code alignment
+
+An external reviewer went through the GitHub-tracked documentation
+line-by-line against the RFP and flagged twelve points, several of which
+turned out to be real code-behavior gaps rather than wording issues once
+checked against the actual implementation. Addressed in full; three
+required real contract and service changes, the rest were documentation
+corrections to already-correct code.
+
+**Managed-`upto`'s on-chain fee, extended off the percentage-only design
+from Round four.** Round four's percentage-only on-chain fee (noted above
+as "deliberate design, not omission") left managed-`upto` unable to offer
+the same fixed/percentage/combined business model the off-chain tiers
+already had. Resolved by adding a `FeeMode` enum
+(`Percentage = 0, Fixed = 1, CombinedMin = 2, CombinedMax = 3`) to both
+`contracts/upto-settlement-escrow` and `contracts/upto-settlement`,
+extending `settle(...)` with `fee_fixed: i128, fee_mode: u32`, and
+replacing the previous "reject raw `fee_bps` above `MAX_FEE_BPS`" check
+with one that computes the effective fee for whichever mode was selected
+and then ceilings *that* as a percentage of `actual_amount` — so the
+on-chain safety cap (2000 bps / 20%) still applies uniformly regardless of
+which mode a settlement uses. The fixed component is denominated in the
+settlement asset's own atomic units rather than USD, deliberately avoiding
+a dependency on a Soroban price oracle for arbitrary SEP-41 assets (the
+same constraint Round four's percentage-only design was originally
+avoiding — this isn't a reversal of that reasoning, it's satisfying it
+under a wider fee model). The witness tuple grew from 8 fields to 10
+(`fee_fixed`, `fee_mode` appended); `actual_amount` remains excluded, per
+the original design in the section above. Mirrored on the TypeScript side
+in `packages/stellar-upto` (`UptoFeeMode`, witness/settle ScVal encoding,
+facilitator-side commitment cross-checks extended to the two new fields).
+Both contracts' test suites were rewritten with 7 new tests each covering
+Fixed/CombinedMin/CombinedMax selection, ceiling-exceeded-by-fixed,
+ceiling-exceeded-by-combined-max, negative `fee_fixed`, and out-of-range
+`fee_mode` — 20/20 passing in the escrow contract, 25/25 in the standard
+contract (49/49 across all three Rust contracts including the untouched
+`custom-account-demo`). `packages/stellar-upto`: 83/83 passing.
+
+**Cataloging re-architected to verify-before-index, closing a real
+integrity gap.** The provisional/confirmed model from Round three (cited
+above) made an unverified, client-submitted resource briefly visible in
+the catalog between `verify()` and `settle()` — the reviewer correctly
+identified this as inconsistent with the catalog-integrity guarantee the
+rest of the design relies on, and separately flagged that MCP resources
+were explicitly skipped from the same live-verification check applied to
+HTTP resources. Both are the same underlying gap: nothing should be
+cataloged, even provisionally, before its payment information is
+independently confirmed. Fixed by moving cataloging entirely to
+`verify()` time, gated on `resource-ownership` verification succeeding
+first (`packages/facilitator/src/discovery-hooks.ts`'s
+`createBazaarCatalogingHook`, now the sole `onAfterVerify` cataloging
+hook); the provisional/confirmed status field, the TTL eviction job, and
+the settle-time durable outbox (`pending_catalog`) were all removed, since
+their original justification (an unrecoverable off-chain write at
+settle-time) no longer applies once cataloging happens earlier, at a point
+that's naturally retried on the resource's next `verify()` call if it
+fails. MCP parity was added via `verifyMcpResourceOwnership` in
+`packages/facilitator/src/resource-ownership.ts`, which connects to the
+declared MCP `resourceUrl` with `@modelcontextprotocol/sdk` and confirms
+the declared tool genuinely exists via `listTools()` — documented
+explicitly, in code, as a narrower guarantee than the HTTP check, since no
+installed `@x402` package exposes an MCP-side `payTo`/pricing declaration
+to cross-check against (verified directly against `@x402/extensions`'s
+type definitions before implementing, rather than assumed). A new
+periodic re-verification job (`packages/facilitator/src/indexer.ts`,
+`DISCOVERY_REVERIFICATION_INTERVAL_MS`, 24h default) replaces the deleted
+TTL-eviction job, independently re-checking already-cataloged resources on
+a rolling interval so pricing/payee drift is caught even without a new
+inbound payload. `packages/discovery`: 52/52 passing.
+`packages/facilitator`: 67/67 passing (resource-ownership 20, billing 25,
+metrics 6, discovery-hooks 16).
+
+**Usage-ranking's default, reconsidered a second time.** Round ten's
+`false` default (above) was itself reconsidered against the final
+architecture description: usage-based ranking is a second
+Reciprocal-Rank-Fusion pass applied only to the candidate set already
+selected by lexical+semantic relevance — it can reorder that set but
+cannot introduce a resource relevance didn't already surface, which bounds
+the downside differently than Round ten's analysis treated it. Flipped
+`DISCOVERY_USAGE_RANKING_ENABLED` back to `true` by default
+(`process.env.DISCOVERY_USAGE_RANKING_ENABLED !== "false"` in
+`packages/facilitator/src/server.ts`); the L2 semantic reranker from Round
+nine stays optional/off by default, unaffected by this. No code changed
+beyond the default flip — same tests, same `pnpm eval:usage-ranking`
+numbers cited in Round ten.
+
+**Documentation-only corrections (no code changed, code was already
+correct):** the three-architecture framing (`exact`, standard `upto`,
+managed `upto`, the latter built on `upto` rather than a fourth
+independent mechanism); the smart-account section's distinction between
+what's demonstrated today (owner-key-only custom accounts settling
+through the unmodified facilitator) versus a real spending-policy account
+(future work, not yet built); non-custodial wording for escrow-and-refund
+`upto` (funds do pass through the settlement contract atomically —
+non-custodial because nothing remains after settlement, not because
+nothing ever moves through it); the `exact` signing-flow description
+(verified directly against the installed `@x402/stellar@2.21.0` source
+rather than either of the doc's two conflicting claims — `exact` follows
+upstream `ExactStellarScheme`'s unmodified signing/settlement flow);
+correcting "adds no code to this path at all" to name specifically that
+only the settlement *scheme* itself is unmodified, not everything around
+it; sharpening the mainnet-evidence wording to distinguish testnet-verified
+real settlement from pubnet-verified-but-unexercised connectivity; and the
+privacy section's "no buyer-linked analytics" claim, corrected to disclose
+that `resource_buyers` retains per-buyer activity over the rolling window
+needed for unique-buyer usage stats, with historical usage stored only as
+aggregated per-resource daily rollups beyond that window.
+
+**Full regression suite after this round:** Rust 49/49
+(`upto-settlement-escrow` 20, `upto-settlement` 25, `custom-account-demo`
+4); `packages/stellar-upto` 83/83; `packages/discovery` 52/52;
+`packages/facilitator` 67/67 — 202 TypeScript tests plus 49 Rust tests
+across the affected packages, all green after every code change in this
+round, not just the ones directly under test.
 
 ## Out of scope for this report
 

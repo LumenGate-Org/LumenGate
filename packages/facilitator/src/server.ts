@@ -19,7 +19,6 @@ import { BillingLedger } from "./billing.js";
 import {
   createBazaarCatalogingHook,
   createBazaarFailureHook,
-  createBazaarVerifyPreviewHook,
   createUsageTrackingHook,
   getBazaarExtensionStatus,
 } from "./discovery-hooks.js";
@@ -33,17 +32,16 @@ const BILLING_DB_PATH = process.env.BILLING_DB_PATH ?? "./data/billing.db";
 // X-Billing-Admin-Token on GET /billing/usage before exposing per-seller
 // volume data in a real deployment.
 const BILLING_ADMIN_TOKEN = process.env.BILLING_ADMIN_TOKEN;
-// Off by default. The usage-ranking channel (docs/bazaar-usage-ranking-design.md
-// §2.2) is cheap and additive-only (never introduces a candidate the
-// relevance channels didn't already select) — but `eval/evaluate-usage-ranking.ts`
-// measured a real, disclosed relevance-quality tradeoff: Recall@1 0.949
-// (relevance-only) vs. 0.692 under a deliberately adversarial synthetic
-// usage scenario. Not a required RFP feature, and search quality is
-// explicitly the RFP's most scrutinized surface — the safer default ships
-// the higher-scoring configuration; usage-ranking stays fully built,
-// tested, and available for a deployment that wants it. Set to "true" to
-// enable it, no redeploy needed.
-const DISCOVERY_USAGE_RANKING_ENABLED = process.env.DISCOVERY_USAGE_RANKING_ENABLED === "true";
+// On by default. The usage-ranking channel (docs/bazaar-usage-ranking-design.md
+// §2.2) is part of the standard Bazaar ranking pipeline: after lexical and
+// semantic retrieval select the relevant candidate set, usage signals
+// (rolling unique buyers, call volume, activity recency) are folded in
+// through a second Reciprocal Rank Fusion pass. It is additive-only — it can
+// reorder relevant resources but never introduces a candidate the relevance
+// stages didn't already select (`catalog.test.ts`, "never introduces a
+// candidate the relevance channels didn't already select"). Set to "false"
+// to disable it, no redeploy needed.
+const DISCOVERY_USAGE_RANKING_ENABLED = process.env.DISCOVERY_USAGE_RANKING_ENABLED !== "false";
 // Off by default — unlike usage-ranking, L2 semantic reranking
 // (docs/bazaar-usage-ranking-design.md §2.1) runs a real cross-encoder
 // model over the top 50 first-stage candidates on every search: measured
@@ -111,18 +109,17 @@ const catalog = new BazaarCatalog(DISCOVERY_DB_PATH);
 const billing = new BillingLedger(BILLING_DB_PATH);
 
 const facilitator = new x402Facilitator()
-  // Cataloging happens at both verify (provisional, per the protocol
-  // "catalogs on receipt" trigger) and settle (confirmed, permanent) — see
-  // "Automatic cataloging: provisional at receipt, confirmed at
-  // settlement" in docs/architecture.md for why both stages matter and how
-  // the provisional stage's TTL bounds the free-spam window a
-  // settlement-blind trigger would otherwise have no defense against.
-  .onAfterVerify(createBazaarVerifyPreviewHook(catalog))
+  // Cataloging is triggered by receipt of a discovery-enabled PaymentPayload
+  // (verify-time), per the protocol's literal cataloging trigger — not by
+  // settlement. Submitted metadata is validated and the resource's actual
+  // payment information is independently verified (HTTP and MCP alike)
+  // before the resource is indexed. See "Automatic cataloging" in
+  // docs/architecture.md.
+  .onAfterVerify(createBazaarCatalogingHook(catalog))
   .onVerifyFailure(createBazaarFailureHook())
-  .onAfterSettle(createBazaarCatalogingHook(catalog))
-  // Registered after createBazaarCatalogingHook, not merged into it — see
-  // createUsageTrackingHook's doc comment for the foreign-key-ordering and
-  // failure-isolation reasons this needs to be its own, later hook.
+  // Registered as its own onAfterSettle hook, not folded into cataloging —
+  // see createUsageTrackingHook's doc comment for the foreign-key-ordering
+  // and failure-isolation reasons.
   .onAfterSettle(createUsageTrackingHook(catalog))
   .onAfterSettle(async context => {
     if (!context.result.success) return;

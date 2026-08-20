@@ -66,6 +66,8 @@ fn standard_upto_pays_full_actual_amount_to_seller() {
         &1,
         &(s.env.ledger().timestamp() + 60),
         &0, // fee_bps = 0 -> standard upto, no on-chain fee split
+        &0, // fee_fixed unused in Percentage mode
+        &0, // fee_mode = Percentage
     );
 
     assert_eq!(seller_amount, 750);
@@ -92,12 +94,81 @@ fn managed_upto_splits_fee_atomically_on_chain() {
         &1,
         &(s.env.ledger().timestamp() + 60),
         &1_000,
+        &0,
+        &0,
     );
 
     assert_eq!(fee, 100);
     assert_eq!(seller_amount, 900);
     assert_eq!(token_client.balance(&s.pay_to), 900);
     assert_eq!(token_client.balance(&s.facilitator), 100);
+}
+
+#[test]
+fn fixed_fee_mode_charges_a_flat_amount_regardless_of_actual_amount() {
+    let s = setup(1_000);
+    let token_client = token::TokenClient::new(&s.env, &s.token);
+
+    let (seller_amount, fee) = s.contract.settle(
+        &s.from,
+        &s.pay_to,
+        &s.facilitator,
+        &s.token,
+        &1_000,
+        &1_000,
+        &1,
+        &(s.env.ledger().timestamp() + 60),
+        &9_999, // must be ignored in Fixed mode
+        &50,
+        &1, // Fixed mode
+    );
+
+    assert_eq!((seller_amount, fee), (950, 50));
+    assert_eq!(token_client.balance(&s.facilitator), 50);
+}
+
+#[test]
+fn combined_min_mode_takes_the_smaller_of_fixed_and_percentage() {
+    let s = setup(1_000);
+
+    // percentage component = 1_000 * 100bps / 10_000 = 10; fixed = 50.
+    let (seller_amount, fee) = s.contract.settle(
+        &s.from,
+        &s.pay_to,
+        &s.facilitator,
+        &s.token,
+        &1_000,
+        &1_000,
+        &1,
+        &(s.env.ledger().timestamp() + 60),
+        &100,
+        &50,
+        &2, // CombinedMin mode
+    );
+
+    assert_eq!((seller_amount, fee), (990, 10));
+}
+
+#[test]
+fn combined_max_mode_takes_the_larger_of_fixed_and_percentage() {
+    let s = setup(1_000);
+
+    // percentage component = 1_000 * 100bps / 10_000 = 10; fixed = 50.
+    let (seller_amount, fee) = s.contract.settle(
+        &s.from,
+        &s.pay_to,
+        &s.facilitator,
+        &s.token,
+        &1_000,
+        &1_000,
+        &1,
+        &(s.env.ledger().timestamp() + 60),
+        &100,
+        &50,
+        &3, // CombinedMax mode
+    );
+
+    assert_eq!((seller_amount, fee), (950, 50));
 }
 
 #[test]
@@ -115,6 +186,8 @@ fn zero_settlement_moves_no_funds_but_consumes_nonce() {
         &1,
         &(s.env.ledger().timestamp() + 60),
         &500,
+        &0,
+        &0,
     );
 
     assert_eq!((seller_amount, fee), (0, 0));
@@ -123,18 +196,31 @@ fn zero_settlement_moves_no_funds_but_consumes_nonce() {
     assert!(s.contract.is_settled(&s.from, &1));
 }
 
+/// With actual_amount == 0 the ceiling is 0 too, so a nonzero fixed fee
+/// must be rejected rather than silently charged against nothing.
+#[test]
+fn zero_settlement_rejects_a_nonzero_fixed_fee() {
+    let s = setup(1_000);
+
+    let result = s.contract.try_settle(
+        &s.from, &s.pay_to, &s.facilitator, &s.token, &1_000, &0, &1,
+        &(s.env.ledger().timestamp() + 60), &0, &1, &1,
+    );
+    assert!(result.is_err());
+}
+
 #[test]
 fn nonce_cannot_be_settled_twice() {
     let s = setup(1_000);
 
     s.contract.settle(
         &s.from, &s.pay_to, &s.facilitator, &s.token, &1_000, &400, &7,
-        &(s.env.ledger().timestamp() + 60), &0,
+        &(s.env.ledger().timestamp() + 60), &0, &0, &0,
     );
 
     let result = s.contract.try_settle(
         &s.from, &s.pay_to, &s.facilitator, &s.token, &1_000, &200, &7,
-        &(s.env.ledger().timestamp() + 60), &0,
+        &(s.env.ledger().timestamp() + 60), &0, &0, &0,
     );
     assert!(result.is_err(), "replaying a settled nonce must fail");
 }
@@ -147,7 +233,7 @@ fn expired_deadline_is_rejected() {
     let result = s.contract.try_settle(
         &s.from, &s.pay_to, &s.facilitator, &s.token, &1_000, &100, &1,
         &9_999, // deadline already in the past
-        &0,
+        &0, &0, &0,
     );
     assert!(result.is_err());
 }
@@ -158,19 +244,55 @@ fn actual_amount_above_max_is_rejected() {
 
     let result = s.contract.try_settle(
         &s.from, &s.pay_to, &s.facilitator, &s.token, &500, &600, &1,
-        &(s.env.ledger().timestamp() + 60), &0,
+        &(s.env.ledger().timestamp() + 60), &0, &0, &0,
     );
     assert!(result.is_err());
 }
 
 #[test]
 fn fee_above_ceiling_is_rejected() {
+    let s = setup(10_000);
+
+    // actual_amount = 10_000: percentage component = 10_000 * 2_500 /
+    // 10_000 = 2_500, well over the 2_000 (20%) ceiling.
+    let result = s.contract.try_settle(
+        &s.from, &s.pay_to, &s.facilitator, &s.token, &10_000, &10_000, &1,
+        &(s.env.ledger().timestamp() + 60), &2_500, &0, &0,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn fixed_fee_above_ceiling_is_rejected() {
     let s = setup(1_000);
 
-    // 2500 bps (25%) exceeds the contract's 2000 bps (20%) hard ceiling.
+    // actual_amount = 500, ceiling = 500 * 2_000 / 10_000 = 100. fee_fixed
+    // = 101 exceeds it, even though fee_bps is 0.
     let result = s.contract.try_settle(
-        &s.from, &s.pay_to, &s.facilitator, &s.token, &1_000, &1_000, &1,
-        &(s.env.ledger().timestamp() + 60), &2_500,
+        &s.from, &s.pay_to, &s.facilitator, &s.token, &1_000, &500, &1,
+        &(s.env.ledger().timestamp() + 60), &0, &101, &1,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn negative_fee_fixed_is_rejected() {
+    let s = setup(1_000);
+
+    let result = s.contract.try_settle(
+        &s.from, &s.pay_to, &s.facilitator, &s.token, &1_000, &500, &1,
+        &(s.env.ledger().timestamp() + 60), &0, &-1, &1,
+    );
+    assert!(result.is_err());
+}
+
+#[test]
+fn out_of_range_fee_mode_is_rejected() {
+    let s = setup(1_000);
+
+    let result = s.contract.try_settle(
+        &s.from, &s.pay_to, &s.facilitator, &s.token, &1_000, &500, &1,
+        &(s.env.ledger().timestamp() + 60), &0, &0, &4,
     );
     assert!(result.is_err());
 }
@@ -181,7 +303,7 @@ fn facilitator_cannot_be_the_payer() {
 
     let result = s.contract.try_settle(
         &s.from, &s.pay_to, &s.from, &s.token, &1_000, &100, &1,
-        &(s.env.ledger().timestamp() + 60), &500,
+        &(s.env.ledger().timestamp() + 60), &500, &0, &0,
     );
     assert!(result.is_err());
 }
@@ -192,7 +314,7 @@ fn facilitator_cannot_be_the_payee() {
 
     let result = s.contract.try_settle(
         &s.from, &s.pay_to, &s.pay_to, &s.token, &1_000, &100, &1,
-        &(s.env.ledger().timestamp() + 60), &500,
+        &(s.env.ledger().timestamp() + 60), &500, &0, &0,
     );
     assert!(result.is_err());
 }
@@ -218,6 +340,8 @@ fn settling_without_the_facilitators_authorization_fails() {
         1_000i128,
         1u64,
         deadline,
+        0u32,
+        0i128,
         0u32,
     )
         .into_val(&s.env);
@@ -246,6 +370,8 @@ fn settling_without_the_facilitators_authorization_fails() {
             &1,
             &deadline,
             &0,
+            &0,
+            &0,
         );
 }
 
@@ -268,6 +394,8 @@ fn settling_with_the_facilitators_authorization_succeeds() {
         1u64,
         deadline,
         0u32,
+        0i128,
+        0u32,
     )
         .into_val(&s.env);
     let full_call_args: soroban_sdk::Vec<soroban_sdk::Val> = (
@@ -279,6 +407,8 @@ fn settling_with_the_facilitators_authorization_succeeds() {
         actual_amount,
         1u64,
         deadline,
+        0u32,
+        0i128,
         0u32,
     )
         .into_val(&s.env);
@@ -314,6 +444,8 @@ fn settling_with_the_facilitators_authorization_succeeds() {
             &1,
             &deadline,
             &0,
+            &0,
+            &0,
         );
 
     assert_eq!(token_client.balance(&s.pay_to), actual_amount);
@@ -332,11 +464,11 @@ fn distinct_nonces_from_same_payer_both_settle() {
 
     s.contract.settle(
         &s.from, &s.pay_to, &s.facilitator, &s.token, &1_000, &300, &1,
-        &(s.env.ledger().timestamp() + 60), &0,
+        &(s.env.ledger().timestamp() + 60), &0, &0, &0,
     );
     s.contract.settle(
         &s.from, &s.pay_to, &s.facilitator, &s.token, &1_000, &300, &2,
-        &(s.env.ledger().timestamp() + 60), &0,
+        &(s.env.ledger().timestamp() + 60), &0, &0, &0,
     );
 
     assert_eq!(token_client.balance(&s.pay_to), 600);
@@ -353,7 +485,7 @@ fn cancel_blocks_a_later_settlement_attempt_with_the_same_nonce() {
 
     let result = s.contract.try_settle(
         &s.from, &s.pay_to, &s.facilitator, &s.token, &1_000, &300, &1,
-        &(s.env.ledger().timestamp() + 60), &0,
+        &(s.env.ledger().timestamp() + 60), &0, &0, &0,
     );
     assert!(result.is_err(), "a cancelled nonce must not be settleable");
 }
@@ -367,7 +499,7 @@ fn cancel_does_not_affect_other_nonces_from_the_same_payer() {
 
     s.contract.settle(
         &s.from, &s.pay_to, &s.facilitator, &s.token, &1_000, &300, &2,
-        &(s.env.ledger().timestamp() + 60), &0,
+        &(s.env.ledger().timestamp() + 60), &0, &0, &0,
     );
 
     assert!(s.contract.is_settled(&s.from, &1));
@@ -380,7 +512,7 @@ fn cancelling_an_already_settled_nonce_fails() {
 
     s.contract.settle(
         &s.from, &s.pay_to, &s.facilitator, &s.token, &1_000, &300, &1,
-        &(s.env.ledger().timestamp() + 60), &0,
+        &(s.env.ledger().timestamp() + 60), &0, &0, &0,
     );
 
     let result = s.contract.try_cancel(&s.from, &1);

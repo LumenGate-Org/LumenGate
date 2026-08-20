@@ -423,10 +423,17 @@ export class UptoStellarEscrowScheme implements SchemeNetworkFacilitator {
     if (commitment.token !== requirements.asset) {
       return { response: invalid("invalid_upto_stellar_payload_wrong_asset", commitment.from) };
     }
-    if (commitment.feeBps !== (extra?.feeBps ?? 0)) {
+    if (
+      commitment.feeBps !== (extra?.feeBps ?? 0) ||
+      commitment.feeFixed !== BigInt(extra?.feeFixed ?? "0") ||
+      commitment.feeMode !== (extra?.feeMode ?? 0)
+    ) {
       return { response: invalid("invalid_upto_stellar_payload_wrong_fee_bps", commitment.from) };
     }
     if (commitment.feeBps > MAX_FEE_BPS) {
+      return { response: invalid("invalid_upto_stellar_fee_exceeds_maximum", commitment.from) };
+    }
+    if (commitment.feeFixed < 0n) {
       return { response: invalid("invalid_upto_stellar_fee_exceeds_maximum", commitment.from) };
     }
     if (extra?.settlementContract !== settlementContract) {
@@ -463,7 +470,11 @@ export class UptoStellarEscrowScheme implements SchemeNetworkFacilitator {
       };
     }
     const acceptedExtra = accepted.extra as unknown as Partial<UptoStellarExtra>;
-    if (commitment.feeBps !== (acceptedExtra?.feeBps ?? 0)) {
+    if (
+      commitment.feeBps !== (acceptedExtra?.feeBps ?? 0) ||
+      commitment.feeFixed !== BigInt(acceptedExtra?.feeFixed ?? "0") ||
+      commitment.feeMode !== (acceptedExtra?.feeMode ?? 0)
+    ) {
       return {
         response: invalid("invalid_upto_stellar_payload_accepted_inconsistent", commitment.from),
       };

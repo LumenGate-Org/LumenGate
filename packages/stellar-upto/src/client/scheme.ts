@@ -86,6 +86,8 @@ export class UptoStellarScheme implements SchemeNetworkClient {
       requestNonce,
       deadline,
       feeBps: extra.feeBps,
+      feeFixed: BigInt(extra.feeFixed),
+      feeMode: extra.feeMode,
     };
 
     // Simulated with actualAmount = maxAmount (the worst case) purely to derive
@@ -191,6 +193,15 @@ export class UptoStellarScheme implements SchemeNetworkClient {
     }
     if (typeof uptoExtra.feeBps !== "number" || uptoExtra.feeBps < 0) {
       throw new Error(`Invalid extra.feeBps: ${uptoExtra.feeBps}`);
+    }
+    if (typeof uptoExtra.feeFixed !== "string" || !/^\d+$/.test(uptoExtra.feeFixed)) {
+      throw new Error(`Invalid extra.feeFixed: ${uptoExtra.feeFixed}`);
+    }
+    if (
+      typeof uptoExtra.feeMode !== "number" ||
+      ![0, 1, 2, 3].includes(uptoExtra.feeMode)
+    ) {
+      throw new Error(`Invalid extra.feeMode: ${uptoExtra.feeMode}`);
     }
   }
 }

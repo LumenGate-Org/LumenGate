@@ -50,6 +50,8 @@ function sampleCommitment(overrides: Partial<UptoWitnessCommitment> = {}): UptoW
     requestNonce: 42n,
     deadline: BigInt(Math.floor(Date.now() / 1000) + 300),
     feeBps: 0,
+    feeFixed: 0n,
+    feeMode: 0,
     ...overrides,
   };
 }

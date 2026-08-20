@@ -1,4 +1,4 @@
-export { BazaarCatalog, DEFAULT_PROVISIONAL_TTL_MS, resourceId } from "./catalog.js";
+export { BazaarCatalog, DEFAULT_REVERIFICATION_INTERVAL_MS, resourceId } from "./catalog.js";
 export { createDiscoveryRouter } from "./router.js";
 export {
   EXTENSION_RESPONSES_HEADER,

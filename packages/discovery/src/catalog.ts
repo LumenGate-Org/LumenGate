@@ -47,12 +47,12 @@ const MIN_SEMANTIC_SIMILARITY = 0.15;
 // cost/quality tradeoff a production system at far larger scale already
 // settled.
 const L2_RERANK_TOP_K = 50;
-// A provisional (verify-time, not-yet-settled) catalog entry is evicted if
-// never confirmed within this window. Generous relative to a typical
-// verify->settle round trip (seconds) to tolerate real-world latency and
-// retries, but still bounds a spammed/never-settled entry's visibility to
-// a fixed window rather than forever — see "Automatic cataloging" below.
-export const DEFAULT_PROVISIONAL_TTL_MS = 15 * 60 * 1000;
+// A cataloged resource's independent payment-information verification
+// (payTo/pricing checked against its live source, not just the submitted
+// discovery payload) is re-run periodically so drift is caught even for a
+// resource nobody has re-submitted discovery metadata for recently — see
+// `listStaleForReverification` and "Automatic cataloging" below.
+export const DEFAULT_REVERIFICATION_INTERVAL_MS = 24 * 60 * 60 * 1000;
 // Usage-based ranking window (see docs/bazaar-usage-ranking-design.md, §5
 // "Derived signals" and §6 "Retention"): both the 30-day rolling average
 // and the `resource_buyers` retention sweep use the same window.
@@ -128,8 +128,7 @@ function fromRow(row: any): CatalogResource {
     accepts: JSON.parse(row.accepts),
     extensions: row.extensions ? JSON.parse(row.extensions) : undefined,
     lastUpdated: row.last_updated,
-    status: row.status,
-    provisionalExpiresAt: row.provisional_expires_at ?? undefined,
+    lastVerifiedAt: row.last_verified_at,
   };
 }
 
@@ -211,8 +210,7 @@ export class BazaarCatalog {
         extensions TEXT,
         extension_keys TEXT,
         last_updated TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'confirmed',
-        provisional_expires_at TEXT,
+        last_verified_at TEXT NOT NULL,
         haystack tsvector,
         embedding vector(${EMBEDDING_DIMENSIONS})
       );
@@ -220,21 +218,8 @@ export class BazaarCatalog {
       CREATE INDEX IF NOT EXISTS idx_resources_scheme ON resources(scheme);
       CREATE INDEX IF NOT EXISTS idx_resources_network ON resources(network);
       CREATE INDEX IF NOT EXISTS idx_resources_type ON resources(type);
-      CREATE INDEX IF NOT EXISTS idx_resources_status ON resources(status, provisional_expires_at);
+      CREATE INDEX IF NOT EXISTS idx_resources_last_verified_at ON resources(last_verified_at);
       CREATE INDEX IF NOT EXISTS idx_resources_haystack ON resources USING GIN(haystack);
-
-      -- Durable outbox for crash-safe cataloging (see "Automatic cataloging"
-      -- in docs/architecture.md): a settlement's full discovery payload is
-      -- written here BEFORE the actual upsert is attempted, and deleted only
-      -- once the upsert succeeds. If the process dies in between, the row
-      -- survives and a separate reconciler
-      -- (packages/facilitator/src/indexer.ts) can find and retry it
-      -- independently of the original request/response cycle that created it.
-      CREATE TABLE IF NOT EXISTS pending_catalog (
-        transaction_hash TEXT PRIMARY KEY,
-        payload TEXT NOT NULL,
-        enqueued_at TEXT NOT NULL
-      );
 
       -- Usage-based ranking (see docs/bazaar-usage-ranking-design.md).
       -- Per-resource, per-day call/unique-buyer counters, retained
@@ -269,50 +254,8 @@ export class BazaarCatalog {
     // startup, including against a database created by an earlier version
     // of this schema.
     await this.db.exec(`
-      ALTER TABLE resources ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'confirmed';
-      ALTER TABLE resources ADD COLUMN IF NOT EXISTS provisional_expires_at TEXT;
+      ALTER TABLE resources ADD COLUMN IF NOT EXISTS last_verified_at TEXT NOT NULL DEFAULT '1970-01-01T00:00:00.000Z';
     `);
-  }
-
-  /**
-   * Durably records the intent to catalog `input`, keyed by the settlement's
-   * transaction hash, before attempting the actual write.
-   */
-  async enqueuePending(transactionHash: string, input: DiscoveredResourceInput): Promise<void> {
-    await this.ready;
-    await this.db.query(
-      `INSERT INTO pending_catalog (transaction_hash, payload, enqueued_at)
-       VALUES ($1, $2, $3)
-       ON CONFLICT (transaction_hash) DO UPDATE SET payload = excluded.payload`,
-      [transactionHash, JSON.stringify(input), new Date().toISOString()],
-    );
-  }
-
-  /**
-   * Marks a previously-enqueued pending entry as resolved (cataloging
-   * succeeded), removing it from the outbox. A no-op if nothing is pending
-   * for this hash.
-   */
-  async resolvePending(transactionHash: string): Promise<void> {
-    await this.ready;
-    await this.db.query(`DELETE FROM pending_catalog WHERE transaction_hash = $1`, [transactionHash]);
-  }
-
-  /**
-   * Lists all not-yet-resolved pending catalog entries, oldest first — for
-   * an external reconciler process to retry independently of the original
-   * request that enqueued them.
-   */
-  async listPending(): Promise<{ transactionHash: string; input: DiscoveredResourceInput; enqueuedAt: string }[]> {
-    await this.ready;
-    const result = await this.db.query<{ transaction_hash: string; payload: string; enqueued_at: string }>(
-      `SELECT transaction_hash, payload, enqueued_at FROM pending_catalog ORDER BY enqueued_at ASC`,
-    );
-    return result.rows.map(row => ({
-      transactionHash: row.transaction_hash,
-      input: JSON.parse(row.payload) as DiscoveredResourceInput,
-      enqueuedAt: row.enqueued_at,
-    }));
   }
 
   /**
@@ -320,14 +263,14 @@ export class BazaarCatalog {
    * validating/sanitizing `input` first — see `@x402/extensions/bazaar`'s
    * `extractDiscoveryInfo`, `validateDiscoveryExtension`, and
    * `sanitizeResourceServiceMetadata`, which this package deliberately does
-   * not re-implement (the facilitator calls those before calling this).
-   *
-   * `options.status` implements "Automatic cataloging: provisional at
-   * receipt, confirmed at settlement" (docs/architecture.md): call with
-   * `status: "provisional"` at verify-time (`createBazaarVerifyPvalidationHook`)
-   * and `status: "confirmed"` at settle-time (`createBazaarCatalogingHook`),
-   * which overwrites any provisional record for the same resource and
-   * clears its expiry.
+   * not re-implement — and, critically, for independently verifying `input`'s
+   * actual payment information against its live source (HTTP 402 response or
+   * MCP tool metadata) *before* calling this: `upsert` itself trusts
+   * `input` and indexes it unconditionally. See "Automatic cataloging" in
+   * docs/architecture.md — cataloging is gated on that verification
+   * succeeding, checked by the caller
+   * (`createBazaarCatalogingHook`/`verifyResourceOwnership` in
+   * `packages/facilitator`), not by this method.
    */
   async upsert(input: DiscoveredResourceInput, options: UpsertOptions): Promise<CatalogResource> {
     await this.ready;
@@ -348,11 +291,7 @@ export class BazaarCatalog {
       id,
       accepts,
       lastUpdated: now,
-      status: options.status,
-      provisionalExpiresAt:
-        options.status === "provisional"
-          ? options.provisionalExpiresAt ?? new Date(Date.now() + DEFAULT_PROVISIONAL_TTL_MS).toISOString()
-          : undefined,
+      lastVerifiedAt: options.lastVerifiedAt,
     };
 
     const haystack = buildSearchableText(record);
@@ -362,10 +301,10 @@ export class BazaarCatalog {
       `INSERT INTO resources (
          id, resource_url, type, method, tool_name, x402_version, description, mime_type,
          service_name, tags, icon_url, pay_to, scheme, network, accepts, extensions,
-         extension_keys, last_updated, status, provisional_expires_at, haystack, embedding
+         extension_keys, last_updated, last_verified_at, haystack, embedding
        ) VALUES (
          $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
-         $17, $18, $19, $20, to_tsvector('english', $21), $22
+         $17, $18, $19, to_tsvector('english', $20), $21
        )
        ON CONFLICT (id) DO UPDATE SET
          resource_url = excluded.resource_url, type = excluded.type, method = excluded.method,
@@ -375,7 +314,7 @@ export class BazaarCatalog {
          pay_to = excluded.pay_to, scheme = excluded.scheme, network = excluded.network,
          accepts = excluded.accepts, extensions = excluded.extensions,
          extension_keys = excluded.extension_keys, last_updated = excluded.last_updated,
-         status = excluded.status, provisional_expires_at = excluded.provisional_expires_at,
+         last_verified_at = excluded.last_verified_at,
          haystack = excluded.haystack, embedding = excluded.embedding`,
       [
         record.id,
@@ -398,8 +337,7 @@ export class BazaarCatalog {
           ? `${EXTENSION_KEY_DELIMITER}${Object.keys(record.extensions).join(EXTENSION_KEY_DELIMITER)}${EXTENSION_KEY_DELIMITER}`
           : null,
         record.lastUpdated,
-        record.status,
-        record.provisionalExpiresAt ?? null,
+        record.lastVerifiedAt,
         haystack,
         toVectorLiteral(embedding),
       ],
@@ -409,20 +347,45 @@ export class BazaarCatalog {
   }
 
   /**
-   * Deletes `"provisional"` entries whose `provisionalExpiresAt` has passed
-   * without being confirmed by a real settlement. Intended to be called
-   * periodically by `packages/facilitator/src/indexer.ts`'s reconciliation
-   * loop — not part of the request/response path.
-   *
-   * @returns The number of evicted entries
+   * Lists cataloged resources whose independent payment-information
+   * verification is older than `olderThanMs`, oldest-verified first —
+   * candidates for periodic re-verification
+   * (`packages/facilitator/src/indexer.ts`), so pricing/payTo drift is
+   * caught even for a resource nobody has resubmitted discovery metadata
+   * for recently. Not part of the request/response path.
    */
-  async evictExpiredProvisional(): Promise<number> {
+  async listStaleForReverification(olderThanMs: number, limit = 100): Promise<CatalogResource[]> {
     await this.ready;
+    const cutoff = new Date(Date.now() - olderThanMs).toISOString();
     const result = await this.db.query(
-      `DELETE FROM resources WHERE status = 'provisional' AND provisional_expires_at < $1 RETURNING id`,
-      [new Date().toISOString()],
+      `SELECT * FROM resources WHERE last_verified_at < $1 ORDER BY last_verified_at ASC LIMIT $2`,
+      [cutoff, limit],
     );
-    return result.rows.length;
+    return result.rows.map(fromRow);
+  }
+
+  /**
+   * Records that `id` was just successfully re-verified, without changing
+   * any other field — used by periodic re-verification when a resource's
+   * live payment information still matches what's cataloged, so a full
+   * `upsert` (which would also bump `lastUpdated` and re-embed the
+   * haystack) isn't needed just to refresh the verification timestamp.
+   */
+  async markVerified(id: string, verifiedAt: string = new Date().toISOString()): Promise<void> {
+    await this.ready;
+    await this.db.query(`UPDATE resources SET last_verified_at = $1 WHERE id = $2`, [verifiedAt, id]);
+  }
+
+  /**
+   * Removes a cataloged resource outright — used by periodic
+   * re-verification when a resource's live payment information no longer
+   * matches what's cataloged (the operator changed `payTo`/pricing, or the
+   * resource is gone entirely): a stale, no-longer-accurate listing is
+   * worse than no listing, so it's dropped rather than left stale.
+   */
+  async remove(id: string): Promise<void> {
+    await this.ready;
+    await this.db.query(`DELETE FROM resources WHERE id = $1`, [id]);
   }
 
   /**
@@ -545,8 +508,8 @@ export class BazaarCatalog {
    * Prunes `resource_buyers` rows whose `last_seen_date` has fallen outside
    * the `USAGE_WINDOW_DAYS`-day active window (§6's retention rule) —
    * intended to be called periodically by `packages/facilitator/src/indexer.ts`,
-   * the same way `evictExpiredProvisional` is. `resource_usage_daily` is
-   * deliberately never pruned here (or anywhere): §6 keeps that table's
+   * the same way `listStaleForReverification`'s results are processed.
+   * `resource_usage_daily` is deliberately never pruned here (or anywhere): §6 keeps that table's
    * history indefinitely, since it's what lets a usage trend be tracked
    * over time, not just a rolling snapshot.
    *
@@ -566,8 +529,8 @@ export class BazaarCatalog {
    * callers outside this class can check what a resource is *currently*
    * cataloged as before writing a new `upsert` over it — e.g.
    * `createBazaarCatalogingHook`'s resource-ownership check, which needs to
-   * know whether a settlement is about to change an already-confirmed
-   * resource's `payTo` before that overwrite happens.
+   * know whether a newly-received discovery payload is about to change an
+   * already-cataloged resource's `payTo` before that overwrite happens.
    */
   async getById(id: string): Promise<CatalogResource | undefined> {
     const result = await this.db.query(`SELECT * FROM resources WHERE id = $1`, [id]);
@@ -832,7 +795,7 @@ export class BazaarCatalog {
    */
   async clear(): Promise<void> {
     await this.ready;
-    await this.db.exec(`TRUNCATE resources, pending_catalog, resource_usage_daily, resource_buyers;`);
+    await this.db.exec(`TRUNCATE resources, resource_usage_daily, resource_buyers;`);
   }
 }
 

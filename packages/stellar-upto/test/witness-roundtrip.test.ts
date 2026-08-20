@@ -17,6 +17,8 @@ function sampleCommitment(): UptoWitnessCommitment {
     requestNonce: 42n,
     deadline: 9_999_999_999n,
     feeBps: 500,
+    feeFixed: 0n,
+    feeMode: 0,
   };
 }
 
@@ -33,19 +35,19 @@ describe("witness encode/decode round-trip", () => {
     expect(result.value.commitment).toEqual(commitment);
   });
 
-  it("buildSettleScArgs matches buildWitnessScArgs on the shared 8 fields, plus actualAmount", () => {
+  it("buildSettleScArgs matches buildWitnessScArgs on the shared 10 fields, plus actualAmount", () => {
     const commitment = sampleCommitment();
     const witnessArgs = buildWitnessScArgs(commitment);
     const settleArgs = buildSettleScArgs(commitment, 500_000n);
 
-    expect(settleArgs).toHaveLength(9);
-    expect(witnessArgs).toHaveLength(8);
-    // settleArgs = [from, payTo, facilitator, token, maxAmount, actualAmount, requestNonce, deadline, feeBps]
-    // witnessArgs = [from, payTo, facilitator, token, maxAmount, requestNonce, deadline, feeBps]
+    expect(settleArgs).toHaveLength(11);
+    expect(witnessArgs).toHaveLength(10);
+    // settleArgs = [from, payTo, facilitator, token, maxAmount, actualAmount, requestNonce, deadline, feeBps, feeFixed, feeMode]
+    // witnessArgs = [from, payTo, facilitator, token, maxAmount, requestNonce, deadline, feeBps, feeFixed, feeMode]
     for (let i = 0; i < 5; i++) {
       expect(settleArgs[i].toXDR("base64")).toEqual(witnessArgs[i].toXDR("base64"));
     }
-    for (let i = 5; i < 8; i++) {
+    for (let i = 5; i < 10; i++) {
       expect(settleArgs[i + 1].toXDR("base64")).toEqual(witnessArgs[i].toXDR("base64"));
     }
   });

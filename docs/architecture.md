@@ -14,24 +14,30 @@ Stellar, plus **Bazaar**, a discovery layer so a buyer or an autonomous
 agent can find a payable resource by natural-language search instead of
 already knowing its URL.
 
-Three settlement schemes recur throughout this document:
+LumenGate supports two payment schemes, **`exact`** and **`upto`**,
+implemented through three settlement architectures. They recur throughout
+this document:
 
-- **`exact`** — a fixed price, paid in full, in one transaction. Reused
-  unmodified from the upstream `@x402/stellar` package (see "What's reused
-  vs. original" below) — this project adds no code to this path at all.
-- **`upto`** — a *ceiling*, not a fixed price: the buyer authorizes a
-  maximum up front, and the facilitator settles later for whatever the
-  resource actually metered, once that's known (e.g. per-token LLM
-  inference, where the exact cost isn't known until the response is
-  generated). Stellar has no equivalent of EVM's Permit2 for this
-  sign-a-ceiling/settle-a-lesser-amount pattern, so this project designed
-  and built a dedicated settlement contract from scratch — see "Why `upto`
-  needed a new contract on Stellar" below.
-- **`managed upto`** — this project's own addition on top of `upto`: the
-  same settlement contract also computes and pays a facilitator fee,
-  atomically, in the same on-chain transaction that settles the buyer's
-  payment — no off-chain invoicing, no trust required that the facilitator
-  counted correctly. See "The three-tier billing model" below.
+- **`exact`** — a fixed price, paid in full, in one transaction. The
+  settlement scheme itself is reused unmodified from the upstream
+  `@x402/stellar` package (see "What's reused vs. original" below);
+  LumenGate integrates it into the facilitator, billing, discovery,
+  monitoring, and agent-facing infrastructure without modifying its
+  settlement logic.
+- **`upto` (standard)** — a *ceiling*, not a fixed price: the buyer
+  authorizes a maximum up front, and the facilitator settles later for
+  whatever the resource actually metered, once that's known (e.g.
+  per-token LLM inference, where the exact cost isn't known until the
+  response is generated). Stellar has no equivalent of EVM's Permit2 for
+  this sign-a-ceiling/settle-a-lesser-amount pattern, so this project
+  designed and built a dedicated settlement contract from scratch — see
+  "Why `upto` needed a new contract on Stellar" below.
+- **`managed upto`** — not a new mechanism independent of `upto`, but an
+  additional architecture built on top of it, through the *same* settlement
+  contract: it also computes and pays a facilitator fee, atomically, in the
+  same on-chain transaction that settles the buyer's payment — no
+  off-chain invoicing, no trust required that the facilitator counted
+  correctly. See "The three-tier billing model" below.
 
 `POST /verify` checks that a payment payload is well-formed and properly
 authorized, without moving any funds; `POST /settle` actually submits the
@@ -71,7 +77,7 @@ first.
 - [Hybrid search architecture](#hybrid-search-architecture)
   - [Search quality evaluation](#search-quality-evaluation)
 - [Usage-based ranking: L2 semantic reranking and a second RRF pass on top of relevance](#usage-based-ranking-l2-semantic-reranking-and-a-second-rrf-pass-on-top-of-relevance)
-- [Automatic cataloging: provisional at receipt, confirmed at settlement](#automatic-cataloging-provisional-at-receipt-confirmed-at-settlement)
+- [Automatic cataloging: verification-gated indexing, HTTP and MCP alike](#automatic-cataloging-verification-gated-indexing-http-and-mcp-alike)
 - [What's reused vs. original](#whats-reused-vs-original)
 - [Scope boundaries (deliberate, not oversold)](#scope-boundaries-deliberate-not-oversold)
 - [Decentralization](#decentralization)
@@ -87,9 +93,9 @@ first.
 | Managed `upto`'s facilitator fee splits **atomically, on-chain**, in the same transaction that settles the buyer's payment | Live testnet settlement with a nonzero `fee_bps`, verified balance deltas across buyer/seller/facilitator | "The three-tier billing model" below · `CONFORMANCE_REPORT.md` |
 | Custom Soroban `__check_auth` accounts (the literal "smart account spending policies" requirement) compose with this facilitator **unmodified** | Live testnet `exact` settlement paid from a deployed custom-account contract, through the unmodified upstream `ExactStellarScheme` | "Composition with Stellar smart account spending policies" below · `pnpm custom-account:testnet` |
 | Channel accounts decouple settlement submission from the facilitator's own signing identity, for concurrent-load scaling | Live testnet run: channel account's sequence number advanced; facilitator signer's own sequence number stayed untouched — confirmed against Horizon | "Sequence-number bottlenecks under load" below |
-| Automatic cataloging survives a process crash mid-write | Unit test forces a crash mid-write and confirms recovery; a real run of the standalone indexer process reconciles a manually-enqueued pending entry end to end, not just in a mock | "Crash-safe settlement confirmation" below |
+| Bazaar never indexes a resource on submitted metadata alone, for HTTP or MCP | Cataloging hook independently re-verifies live payment information (HTTP 402 / MCP tool listing) before every `upsert`, gated in the hook itself, plus a periodic re-verification pass for already-cataloged resources | "Automatic cataloging" below |
 | Usage-based search ranking never promotes a candidate the relevance stages didn't already select, and its real-world tradeoff is measured, not assumed | Dedicated containment test, plus a harness-level eval with synthetic usage data — which caught and led to fixing a real implementation regression before it shipped | "Usage-based ranking" below · `pnpm eval:usage-ranking` |
-| Full automated test suite | **300 tests passing** — 265 TypeScript across 5 packages (`discovery`, `facilitator`, `mcp-discovery-server`, `sdk`, `stellar-upto`), 35 Rust across 3 Soroban contracts — plus 10 live testnet/pubnet conformance scripts exercising real transactions | Per-package `pnpm test` · `e2e/conformance/CONFORMANCE_REPORT.md` |
+| Full automated test suite | **309 tests passing** — 260 TypeScript across 5 packages (`discovery`, `facilitator`, `mcp-discovery-server`, `sdk`, `stellar-upto`), 49 Rust across 3 Soroban contracts — plus 10 live testnet conformance scripts exercising real settlement transactions. Pubnet (mainnet) scripts are connectivity/configuration checks only — see "Scope boundaries" below for what's live on which network | Per-package `pnpm test` · `e2e/conformance/CONFORMANCE_REPORT.md` |
 
 Every row links to the section (or the conformance report) with the full
 methodology behind it — this table is an index, not a substitute for
@@ -141,11 +147,16 @@ either already knows a resource's URL, or finds one via Bazaar first
 directly returns `402 Payment Required` with structured
 `PaymentRequirements`. The buyer's client (`packages/sdk`, or the MCP
 server's `call_resource` tool) builds and signs a payment payload against
-those exact requirements — a signed transaction for `exact`, a scoped
-Soroban authorization entry for `upto`/`managed upto` (see "Why `upto`
-needed a new contract on Stellar" below for why the two differ
-structurally) — and resubmits the original request with that payload
-attached. The resource server calls this facilitator's `POST /verify` to
+those exact requirements — a signed Soroban authorization entry for every
+scheme, `exact` included (the facilitator, not the buyer, submits and pays
+the network fee, which is why the buyer signs an authorization entry rather
+than a full transaction — see "Auth entries, not pre-signed transactions"
+in "Stellar-specific operational considerations" below), differing only in
+what the entry commits to: `exact`'s witness (unmodified upstream
+`ExactStellarScheme`) commits to the exact settled amount; `upto`/`managed
+upto`'s deliberately excludes it (see "Why `upto` needed a new contract on
+Stellar" below for why) — and resubmits the original request with that
+payload attached. The resource server calls this facilitator's `POST /verify` to
 confirm the payload is well-formed and properly authorized *before* serving
 the resource (no funds move yet), then, once it has served the response,
 `POST /settle` to actually submit the transaction and move funds
@@ -171,8 +182,8 @@ model doesn't have an equivalent of:
 | Tier | Scheme | Facilitator fee | Where it's paid |
 |---|---|---|---|
 | 1 | `exact` | Metered per-settlement, first N/mo free, then a configured fee | Off-chain (`packages/facilitator/src/billing.ts`) |
-| 2 | `upto`, `feeBps: 0` | Same off-chain metering as tier 1 | Off-chain |
-| 3 | `upto`, `feeBps > 0` (**managed upto**) | A percentage the client's signature commits to | **On-chain, atomically, in the same settlement transaction** |
+| 2 | `upto`, standard | Same off-chain metering as tier 1 | Off-chain |
+| 3 | `upto`, managed (**managed upto**) | The same configurable business model as tiers 1-2 | **On-chain, atomically, in the same settlement transaction** |
 
 Tier 3 exists because Stellar's `upto` implementation required a new
 settlement contract anyway (see below) — once fund movement goes through
@@ -180,24 +191,35 @@ that contract, having it also compute and pay the facilitator's cut in the
 same call is a small addition with a real benefit: no off-chain invoicing
 system, no trust required that the facilitator counted correctly, and a
 publicly-verifiable on-chain fee. It is opt-in per route (`UptoStellarScheme`
-in `packages/stellar-upto/src/server`, `feeBps` option) — a seller who wants
-the simpler off-chain billing model for their `upto` routes just leaves it at
-the `0` default.
+in `packages/stellar-upto/src/server`, `feeBps`/`feeFixed`/`feeMode` options)
+— a seller who wants the simpler off-chain billing model for their `upto`
+routes just leaves the fee unset (`feeBps: 0`, `feeMode: Percentage`).
 
-Tiers 1 and 2's off-chain fee is one general, configurable shape
-(`BillingFeeConfig` in `packages/facilitator/src/billing.ts`), not a
-hardwired flat rate: a fixed per-settlement charge, a percentage of the
-settled amount, or a **combination of both**, where the applied fee is
-`min(fixed, percentage × settled amount)` or `max(...)`, per the seller's
-own `combineRule` — e.g. "0.0001 USDC or 1% of the settled amount, whichever
-is smaller" protects small settlements from a disproportionate fixed charge
-while still scaling with volume on larger ones. Percentage/combined mode is
-computed against the settlement asset's own atomic units (`assetDecimals`,
-default 7 for SEP-41 USDC) rather than a hardcoded USD conversion, since the
-protocol requirements require supporting any SEP-41 token, not only USDC — an operator
-metering a different-decimals token sets `assetDecimals` accordingly. This
-satisfies the protocol requirements requirement (Section 3.1: "any fee must be
-configurable rather than hard wired").
+**LumenGate uses the same configurable facilitator-fee model across all
+three tiers.** `BillingFeeConfig`'s shape (`packages/facilitator/src/billing.ts`)
+— fixed, percentage, or a **combination of both**, where the applied fee is
+`min(fixed, percentage × settled amount)` or `max(...)` per the seller's own
+`combineRule` — is what tiers 1-2 bill off-chain, and what the settlement
+contract itself computes on-chain for tier 3 via its mirrored `FeeMode`
+enum (`Percentage`/`Fixed`/`CombinedMin`/`CombinedMax`,
+`contracts/upto-settlement-escrow/src/lib.rs`). Exact and standard `upto`
+compute and bill facilitator fees off-chain; managed `upto` integrates the
+fee into the atomic on-chain settlement instead. The one deliberate
+difference between the off-chain and on-chain shapes: the on-chain fixed
+component (`fee_fixed`) is denominated in the settlement asset's own atomic
+units, not USD — a Soroban contract has no price oracle to convert a fixed
+USD amount into an arbitrary settlement asset without one, so rather than
+force a USD conversion, the on-chain fixed component is simply "a flat
+amount in whatever asset is actually being settled," which needs no oracle
+for any SEP-41 asset, not just USDC. **For managed `upto`, the settlement
+contract additionally enforces a maximum facilitator fee percentage
+independently of any off-chain configuration** — `MAX_FEE_BPS` bounds the
+*effective* fee (whichever mode computed it) as a percentage of the actual
+settled amount, so an arbitrarily large `fee_fixed` can't be used to bypass
+the percentage ceiling in `Fixed`/`CombinedMax` mode. This satisfies the
+protocol requirements requirement (Section 3.1: "any fee must be
+configurable rather than hard wired") uniformly across all three tiers, not
+just the two off-chain ones.
 
 **Per-seller plans, not one global config.** Each seller (`payTo`) can carry
 its own `SellerBillingPlan` — allowance period (day, month, or year), how
@@ -215,93 +237,72 @@ so failed verifications and failed settlements never reach the billing
 ledger at all; this is structural, not a filter the ledger applies
 after the fact.
 
-**This configurable fixed/percentage/combined model applies to the two
-off-chain tiers only — not to managed `upto`'s on-chain fee.** The
-contract's `fee_bps` (tier 3) is deliberately percentage-only, computed and
-paid in whatever asset was actually settled, with a hard on-chain ceiling
-(`MAX_FEE_BPS`). A *fixed*-USD-denominated component isn't something a
-Soroban contract can compute for an arbitrary settlement asset without a
-price oracle it doesn't have — "0.0001 USDC flat" only means something
-directly on-chain when the settlement asset already *is* that exact USDC
-token; for any other SEP-41 asset, a flat-fee-in-USDC component would need
-either a second, separate token transfer (the buyer holding and approving a
-distinct fee asset) or an on-chain price conversion, both real added
-complexity this design deliberately doesn't take on. This is a genuine
-architectural boundary, not an oversight — see "Technical assessment: can
-the off-chain fixed/percentage/combined model extend on-chain?" below for
-the full reasoning.
-
 **Who authorizes the fee.** Only the buyer signs anything in this design —
 there is no seller-side signature at all (see the seller-authorization row
 below). That makes the buyer's witness the *only* cryptographic commitment
-to `fee_bps` that exists anywhere in the system today, which is why
-`fee_bps` is currently part of the synthetic args tuple the buyer
-authorizes (`contracts/upto-settlement-escrow/src/lib.rs`): removing it without
-replacing it with anything would mean no party commits to the fee split at
-all, and a compromised facilitator could then always take the contract's
-`MAX_FEE_BPS` ceiling regardless of what it advertised at signing time. The
-buyer's total exposure doesn't actually change either way — `fee_bps` only
-splits `actual_amount` between `pay_to` and the facilitator, it doesn't add
-to what the buyer can be charged, which is still capped by `max_amount` —
-so external feedback that a buyer "shouldn't have to authorize facilitator
-fees," since the fee split is a facilitator/seller commercial matter, is
-right in principle. But binding it to the buyer's signature today isn't
-solving a problem the buyer actually has; it's compensating for the absence
-of a seller-side signature. Properly moving that commitment to the seller
-is the same redesign already flagged as a deliberate gap, not a new,
-separate one — see "Seller-side authorization of the settled amount" below.
+to the fee that exists anywhere in the system today, which is why
+`fee_bps`, `fee_fixed`, and `fee_mode` are all part of the synthetic args
+tuple the buyer authorizes (`contracts/upto-settlement-escrow/src/lib.rs`):
+removing them without replacing that commitment with anything would mean no
+party commits to the fee split at all, and a compromised facilitator could
+then always take the contract's `MAX_FEE_BPS` ceiling regardless of what it
+advertised at signing time. The buyer's total exposure doesn't actually
+change either way — the fee only splits `actual_amount` between `pay_to`
+and the facilitator, it doesn't add to what the buyer can be charged, which
+is still capped by `max_amount` — so external feedback that a buyer
+"shouldn't have to authorize facilitator fees," since the fee split is a
+facilitator/seller commercial matter, is right in principle. But binding it
+to the buyer's signature today isn't solving a problem the buyer actually
+has; it's compensating for the absence of a seller-side signature. Properly
+moving that commitment to the seller is the same redesign already flagged
+as a deliberate gap, not a new, separate one — see "Seller-side
+authorization of the settled amount" below.
 
-### Technical assessment: can the off-chain fixed/percentage/combined model extend on-chain?
+### Technical assessment: how the off-chain fixed/percentage/combined model extends on-chain
 
 Raised directly by external validation: the off-chain pricing model (fixed,
 percentage, or a min/max combination of both, plus a configurable free
-allowance) is deliberately general, and the natural question is whether
-managed `upto`'s on-chain `fee_bps` could be extended to the same shape,
-for a single, consistent business model across all three tiers. The honest
-answer is **partially, and the boundary is a real architectural one, not a
-missing feature**:
+allowance) is deliberately general, and the natural question was whether
+managed `upto`'s on-chain fee could be extended to the same shape, for a
+single, consistent business model across all three tiers. It can, and does
+— the resolution turned on one design choice:
 
-- **Percentage-only is what's cheap and safe on-chain today.** `fee =
+- **Percentage stays cheap and safe on-chain, unchanged.** `fee =
   actual_amount * fee_bps / BPS_DENOMINATOR` is a single multiply-and-divide
   against the exact asset already being settled — no conversion, no
-  external price data, no added trust assumption. It composes with the
-  atomic escrow-and-refund (or allowance) settlement with zero extra moving
-  parts.
-- **A flat, USD-denominated component doesn't have a cheap on-chain
-  equivalent for an arbitrary SEP-41 asset.** "0.0001 USDC flat" is only
-  directly meaningful on-chain when the settlement asset already *is* that
-  USDC token — the contract can just move a fixed atomic amount of the same
-  asset it's already handling. The moment a seller settles in a different
-  SEP-41 asset (which this project explicitly supports, not just USDC), a
-  flat USDC-denominated fee requires either (a) a **second**, separate
-  token transfer in USDC specifically — meaning the buyer would need to
-  hold *and* pre-authorize a second asset just to pay a flat fee component,
-  a real new prerequisite this design was built specifically to avoid — or
-  (b) an **on-chain price conversion** from the settlement asset to USDC,
-  which needs a price oracle Soroban doesn't provide natively and this
-  project has not integrated. Either path is a materially bigger, riskier
-  contract than the one that exists and is proven live today.
-- **A `min`/`max` combined rule is mechanically easy on-chain in isolation**
-  (it's one more comparison), **but it inherits the flat-component problem
-  above** — combining "fixed" with "percentage" on-chain only avoids the
-  oracle/second-transfer problem if the flat component is waived down to
-  zero for non-USDC assets, which isn't really "the same model," just a
-  percentage-only model with an inert extra field.
-- **What would make full parity possible**: either (a) restricting managed
-  `upto`'s on-chain fee to only the case where the settlement asset is
-  already USDC (a real, shippable restriction, not a redesign — the
-  contract already receives `token` as an argument and could branch on it),
-  or (b) integrating a Soroban price-oracle dependency, a materially larger
-  scope addition with its own trust/liveness considerations (oracle
-  staleness, oracle compromise) that this implementation has not taken on.
+  external price data, no added trust assumption.
+- **The flat component is denominated in the settlement asset's own atomic
+  units, not USD — which is what removes the oracle problem entirely,** not
+  just for USDC. A prior design considered a USD-denominated flat fee
+  ("0.0001 USDC flat"), which is only directly meaningful on-chain when the
+  settlement asset already *is* USDC — any other SEP-41 asset would need
+  either a second, separate token transfer in USDC specifically, or an
+  on-chain price conversion needing a price oracle Soroban doesn't provide
+  natively. Denominating `fee_fixed` directly in the settlement asset's own
+  atomic units sidesteps that conversion question altogether: "pay 50 units
+  of whatever asset is already being settled" needs no price data for any
+  asset, USDC included. This is not a workaround for USDC specifically — it
+  works identically for every SEP-41 asset this project supports.
+- **The `min`/`max` combined rule composes cleanly on top of that.**
+  `FeeMode::CombinedMin`/`CombinedMax` compare the (now same-asset) fixed
+  and percentage components directly, no conversion needed between them
+  either, since both are already denominated in the settlement asset.
+- **The on-chain safety ceiling (`MAX_FEE_BPS`) had to change shape to stay
+  meaningful across all four modes.** Bounding the raw `fee_bps` parameter
+  (the pre-existing check) means nothing once `Fixed` mode can set an
+  arbitrarily large `fee_fixed` that ignores `fee_bps` entirely. The
+  ceiling now bounds the *effective* fee — whichever mode computed it — as
+  a percentage of `actual_amount`: `fee <= actual_amount * MAX_FEE_BPS /
+  BPS_DENOMINATOR`, checked once, after computing `fee`, regardless of
+  `fee_mode`. This is what makes "the settlement contract additionally
+  enforces a maximum facilitator fee percentage independently of any
+  off-chain configuration" true uniformly, not only for the mode that was
+  already percentage-shaped.
 
-**Recommendation**: keep managed `upto`'s on-chain fee percentage-only, as
-shipped — it is the correct, minimal design for "compute a fee the contract
-can trust without external input." If full fixed/percentage/combined parity
-on-chain is a real product requirement, option (a) above (USDC-only flat/
-combined fee, percentage-only for every other asset) is the concrete,
-scoped next step — not a redesign of the settlement contract, an additive
-branch on an argument it already has.
+See `contracts/upto-settlement-escrow/src/lib.rs`'s `FeeMode` enum and its
+`settle()` fee computation for the implementation, and
+`contracts/upto-settlement-escrow/src/test.rs` for the tests covering all
+four modes and the percentage-ceiling check under each of them.
 
 ## Why `upto` needed a new contract on Stellar
 
@@ -842,6 +843,17 @@ including a Word-doc version for external review) and then implemented in
 two passes — usage-ranking first, L2 semantic reranking after, once the
 usage work's own eval harness existed to validate against.
 
+**Usage-based ranking is part of the standard Bazaar ranking pipeline.**
+After lexical and semantic retrieval (above) select the relevant candidate
+set, usage signals — rolling unique buyers, call volume, and activity
+recency — are incorporated through a second Reciprocal Rank Fusion pass, on
+by default. Usage can reorder resources already judged relevant but can
+never introduce a resource the relevance stages didn't already select — see
+"never introduces a candidate the relevance channels didn't already
+select" below for the test proving that containment holds. L2 semantic
+reranking remains optional and off by default, for the separate latency
+reason described below.
+
 **L2 semantic reranking** (`packages/discovery/src/reranker.ts`): a genuine
 second-stage cross-encoder, the same shape as Azure AI Search's L2 semantic
 ranking — `Xenova/ms-marco-MiniLM-L-6-v2` via `AutoTokenizer` +
@@ -854,8 +866,9 @@ plumbing: a resource containing both query words literally but describing
 an unrelated board game outranks the actual matching resource under plain
 hybrid search (the literal match wins); enabling `l2rerank` correctly
 promotes the genuine match to first (`catalog.test.ts`). Measured ~800ms
-for 50 candidates on commodity hardware — meaningful enough that it's off
-by default (`DISCOVERY_L2_RERANK_ENABLED`), unlike usage.
+for 50 candidates on commodity hardware — meaningful enough that it stays
+off by default (`DISCOVERY_L2_RERANK_ENABLED`), unlike the usage channel,
+which is cheap and on by default (see "Rollout" below).
 
 **Usage as a second RRF pass**: folded in via the *exact same* Reciprocal
 Rank Fusion mechanism the hybrid search above already uses, applied a
@@ -915,30 +928,25 @@ failure must never be reported as a cataloging failure for a settlement
 that actually succeeded; this hook never touches the extension status the
 route handler reports back).
 
-**Rollout.** Lands behind `search()`'s existing `channels` option
-(`"usage"` and `"l2rerank"`, alongside `"lexical"`/`"vector"`) — the HTTP
-discovery router runs lexical+vector only by default; both `"usage"` and
-`"l2rerank"` are opt-in, via `DISCOVERY_USAGE_RANKING_ENABLED` and
-`DISCOVERY_L2_RERANK_ENABLED` (`server.ts`, both default `false`).
-**Usage-ranking's default was deliberately changed from on to off** after
-the "What's validated" numbers below came in: it's not an RFP-required
-feature, and search quality is explicitly the RFP's most scrutinized
-surface, so shipping the higher-scoring configuration (relevance-only,
-Recall@1 0.949) as the default outweighs shipping the feature itself
-enabled — the tested, measured tradeoff is documented, not hidden, and the
-feature remains fully available for a deployment that wants it. Either
-channel can be toggled independently at any time, with no redeploy.
-`resource_buyers`'s retention sweep reuses the existing indexer
-reconciliation loop (`indexer.ts`) rather than a new scheduling mechanism.
+**Rollout.** Lands behind `search()`'s existing `channels` option (`"usage"`
+and `"l2rerank"`, alongside `"lexical"`/`"vector"`) — the HTTP discovery
+router runs the usage channel on by default (`DISCOVERY_USAGE_RANKING_ENABLED`,
+`server.ts`, set to `"false"` to disable); `l2rerank` stays opt-in
+(`DISCOVERY_L2_RERANK_ENABLED`, default `false`), for the separate,
+unrelated reason below. Either channel can be toggled independently at any
+time, with no redeploy. `resource_buyers`'s retention sweep reuses the
+existing indexer reconciliation loop (`indexer.ts`) rather than a new
+scheduling mechanism.
 
 **What's validated.** `pnpm eval:search` shows no regression from either
-new stage (Recall@1 0.949, Recall@5 1.000, NDCG@5 0.996 — matching the
-pre-implementation baseline; the eval fixtures carry no usage data and
-don't enable `l2rerank`, so neither stage affects that number). The
+new stage on the relevance-only fixture (Recall@1 0.949, Recall@5 1.000,
+NDCG@5 0.996 — matching the pre-implementation baseline; the eval fixtures
+carry no usage data and don't enable `l2rerank`, so neither stage affects
+that number regardless of which channels are enabled at runtime). The
 harness-level evaluation this section previously flagged as missing —
 synthetic usage data layered onto the full labeled query set, reporting
 Recall/NDCG with-and-without usage the same way the lexical-vs-hybrid
-comparison does — is now `pnpm eval:usage-ranking`
+comparison does — is `pnpm eval:usage-ranking`
 (`eval/evaluate-usage-ranking.ts`), and it did real work: it caught a
 genuine implementation regression (Recall@1 0.949 → 0.615) that every
 qualitative unit test had missed, from an intermediate refactor that
@@ -946,7 +954,11 @@ collapsed multi-channel relevance into a single rank before fusing usage.
 Fixed and re-measured at 0.692 under the same deliberately adversarial
 (fully usage/relevance-uncorrelated) synthetic scenario — see §7 of the
 design doc for why that residual is expected, not a lingering bug, and why
-a *zero*-flip result would itself have been the suspicious outcome.
+a *zero*-flip result would itself have been the suspicious outcome. The
+measured tradeoff (0.949 relevance-only vs. 0.692 under adversarial
+synthetic usage) is documented, not hidden, and is exactly why the usage
+channel remains independently toggleable — a deployment that wants
+relevance-only ranking can disable it with no redeploy.
 
 **Test coverage.** 57 tests in `packages/discovery/test/catalog.test.ts` +
 `reranker.test.ts` (up from 32 before any of this ranking work began), 22
@@ -958,7 +970,7 @@ usage-RRF-pass ordering and candidate-set containment, L2 reranking's
 genuine (not incidental) reordering behavior and candidate-set containment,
 and the hook's foreign-key guard, payer-sourcing, and failure isolation.
 
-## Automatic cataloging: provisional at receipt, confirmed at settlement
+## Automatic cataloging: verification-gated indexing, HTTP and MCP alike
 
 The protocol requirements literal cataloging trigger (Section 3.2): *"When the facilitator
 receives a PaymentPayload carrying the discovery extension, it validates
@@ -974,42 +986,70 @@ percent-decoding/traversal checks (all implemented via `@x402/extensions/bazaar`
 see "What's reused vs. original" below), not settlement, is what the protocol requirements
 describes as the anti-poisoning mechanism.
 
-An earlier version of this project gated cataloging entirely on settlement
-success instead, for a real reason, found empirically: `verify()` moves no
-funds and submits nothing on-chain, so cataloging unconditionally at
-verify-time once let anyone with a validly-signed-but-never-settled payment
-authorization — costless against a self-controlled, self-minted token —
-inject arbitrary resource metadata into the search index for free,
-repeatedly. That reasoning wasn't wrong, but it also wasn't what the protocol requirements
-text describes, and it was never disclosed as a deviation from the protocol requirements
-literal trigger — a real gap in its own right, caught in a later validation
-pass.
+**When the facilitator receives a `PaymentPayload` carrying the discovery
+extension, it validates the submitted metadata and independently verifies
+the resource's actual payment information before indexing it in Bazaar.**
+Settlement is not the cataloging trigger — an earlier version of this
+project gated cataloging entirely on settlement instead, for a real reason
+found empirically (`verify()` moves no funds, so cataloging unconditionally
+there once let anyone with a validly-signed-but-never-settled authorization
+inject metadata for free), but that reasoning, while real, wasn't what the
+protocol describes, and the actual fix isn't to gate on settlement — it's
+to verify *before* indexing, at the same `verify()`-time trigger the
+protocol calls for. Concretely (`createBazaarCatalogingHook`,
+`packages/facilitator/src/discovery-hooks.ts`, registered as an
+`onAfterVerify` hook): once a payload's discovery extension is extracted
+and validated, `packages/facilitator/src/resource-ownership.ts`'s
+`verifyResourceOwnership` independently confirms the resource's real
+payment information — before `catalog.upsert` is ever called. Nothing is
+indexed on submitted metadata alone, at any point; there is no
+provisional/unverified-but-visible stage to bound with a TTL, because
+there's nothing to bound.
 
-**The fix reconciles both:** a resource is cataloged with `status:
-"provisional"` immediately, at `verify()` time, matching the protocol requirements literal
-trigger (`createBazaarVerifyPreviewHook`) — visible in `list()`/`search()`
-right away, no separate registration step. If the same request later
-settles successfully, `createBazaarCatalogingHook` promotes the entry to
-`status: "confirmed"`, permanent, no expiry. If it never settles, the
-provisional entry is evicted once `provisionalExpiresAt` passes (15 minutes
-by default, `DEFAULT_PROVISIONAL_TTL_MS`) — swept by
-`packages/facilitator/src/indexer.ts`'s reconciliation loop, the same
-genuinely-separate process that already reconciles the settlement-cataloging
-outbox (see below). This bounds, rather than eliminates, the free-spam
-window a settlement-blind trigger has no defense against — a deliberate,
-disclosed tradeoff, not a claim that provisional cataloging is costless.
-`GET /discovery/resources`/`/search` expose `status` on every returned
-resource, so a consumer (including an agent deciding whether to trust a
-listing) can see which stage a resource is at.
+**HTTP and MCP resources follow the same catalog-integrity rule.** For HTTP
+resources, verification re-fetches the resource's own live 402 response
+directly — unauthenticated, since that's the whole point of a 402
+challenge — and confirms it actually names the same `payTo` for a matching
+scheme/network/asset. For MCP resources, verification connects to the
+resource's own live MCP server (Streamable HTTP transport) and confirms the
+declared tool genuinely exists there. Same SSRF posture for both (HTTPS-only
+off loopback, private/link-local hosts blocked including via DNS
+resolution, bounded timeout; HTTP additionally never follows redirects),
+fails closed on any error, and MCP resources are not exempt from
+independent verification the way an earlier version of this project left
+them. **A narrower guarantee for MCP than for HTTP, stated precisely rather
+than oversold**: an MCP `tools/list` response carries no `PaymentRequirements`/
+`payTo` of its own to cross-check against — payment terms for an
+x402-over-MCP tool call are negotiated inside the tool-call flow itself,
+not declared in the tool listing, and no published `@x402` package this
+project depends on exposes a resource-server-side MCP payment-declaration
+convention to verify against independently yet. So the MCP check closes
+"resourceUrl/toolName is entirely fabricated, no such server or tool
+exists" — the same class of attack the HTTP check closes for a squatted
+URL — but does not yet cross-check `payTo` for MCP the way the HTTP path
+does. Disclosed here, not left implicit; closing that residual gap needs a
+real x402-over-MCP payment-declaration convention to verify against, a
+protocol-level gap this check alone can't resolve. See
+`packages/facilitator/src/resource-ownership.ts`'s
+`verifyMcpResourceOwnership` doc comment for the full reasoning.
+
+**Re-verification is skipped only when a write wouldn't change who an
+already-cataloged resource says it pays.** A resource re-submitting the
+same `payTo` it already has doesn't need a fresh outbound check on every
+single request; a brand-new resource, or one whose `payTo` is about to
+change, always gets checked. **When a new valid discovery payload is
+received for an already-cataloged resource, its metadata is revalidated
+and the existing entry is updated** through this same path.
 
 **Catalog integrity for the data that matters — `payTo`, price, network —
-is unaffected by which stage cataloged the entry.** Both hooks build the
-catalog payload from `paymentPayload.accepted` (the client-echoed
-*advertised* requirements, never the settle-phase metered-actual-charge
-override), and for `upto`, `accepted` is cross-checked against the buyer's
-witness commitment in `UptoStellarScheme._verify` — so publishing a listing
-under someone else's `payTo`, or at a price never actually authorized,
-isn't possible at either stage without breaking the witness check. See
+is unaffected by resubmission.** The hook builds the catalog payload from
+`paymentPayload.accepted` (the client-echoed *advertised* requirements,
+never a settle-phase override — cataloging happens entirely at verify-time
+now, so there is no settle-phase amount override to guard against in the
+first place), and for `upto`, `accepted` is cross-checked against the
+buyer's witness commitment in `UptoStellarScheme._verify` — so publishing a
+listing under someone else's `payTo`, or at a price never actually
+authorized, isn't possible without breaking the witness check. See
 `packages/facilitator/src/discovery-hooks.ts` for the full incident trail
 this protection was built through (a one-off metered charge published as
 the advertised price; an unvalidated `accepted` on direct `/settle` calls;
@@ -1020,75 +1060,40 @@ not smoothed over in hindsight.
 **That witness check is a narrower guarantee than it might sound like,
 though, and worth stating precisely.** It confirms the cataloged `payTo`
 really is the address a real, witness-authorized payment went to — it does
-*not* confirm that whoever settled that payment actually operates
-`resourceUrl`. Both `resourceUrl` and `payTo` originate from
+*not*, on its own, confirm that whoever submitted the payload actually
+operates `resourceUrl`. Both `resourceUrl` and `payTo` originate from
 `PaymentPayload.accepted`, which is client-supplied (see
 `extractCatalogInput`), and `resourceId` keys the catalog by `resourceUrl`
-alone for HTTP resources — so anyone can settle a real, even self-dealt and
-trivial-amount, payment while claiming someone *else's* real, already
-popular `resourceUrl` with their own `payTo`, and `upsert`'s `ON CONFLICT
-... DO UPDATE` overwrites that resource's real entry outright. A live
-`call_resource` still pays whoever the resource's actual 402 challenge
-names — this doesn't redirect funds — but the catalog itself would show the
-wrong `payTo`/description/tags for a real, already-established resource
-until its legitimate operator happens to settle again, which could be a
-long time for a resource with infrequent traffic. Closed by
-`packages/facilitator/src/resource-ownership.ts`: before a settlement is
-allowed to change an existing resource's cataloged `payTo` (or catalog a
-brand-new `resourceUrl` at all), `createBazaarCatalogingHook` re-fetches
-that URL's own live 402 challenge directly — unauthenticated, since that's
-the whole point of a 402 challenge — and confirms it actually names the
-same `payTo`. A squatter has no way to make someone else's server answer
-with their address, so this closes the gap the witness check alone leaves
-open. Same SSRF posture as `AGENT_ALLOWED_HOSTS`'s guard in
-`packages/mcp-discovery-server/src/guardrails.ts` (HTTPS-only off loopback,
-private/link-local hosts blocked including via DNS resolution, no
-redirects followed, bounded timeout), fails closed on any error, and is
-skipped only for `type: "mcp"` resources (not implemented for that
-transport) and for a settlement that doesn't change an already-cataloged
-resource's `payTo` (no reason to pay for a fresh outbound fetch on every
-single re-confirmation of an unchanged listing). Precisely, not
-optimistically: `onAfterSettle` hooks run synchronously and are awaited
-before `settle()`'s HTTP response returns, so for that minority of
-requests this genuinely adds up to its timeout to the caller-visible
-`/settle` latency — not a background check. See "Outbound network
-dependency during settlement" in `docs/runbook.md` for the operational
-framing of that tradeoff.
+alone for HTTP resources — so without the independent ownership check
+above, anyone could submit a real, even self-dealt and trivial-amount,
+payload while claiming someone *else's* real, already popular
+`resourceUrl` with their own `payTo`, and `upsert`'s `ON CONFLICT ... DO
+UPDATE` would overwrite that resource's real entry outright. That's
+precisely the gap `verifyResourceOwnership` exists to close, gating the
+`upsert` itself rather than running as a separate, skippable step: a
+squatter has no way to make someone else's server answer with their
+address (HTTP) or serve their tool (MCP), so the check fails and the write
+never happens. Precisely, not optimistically: `onAfterVerify` hooks run
+synchronously and are awaited before `verify()`'s HTTP response returns, so
+for a new-or-changing resource this genuinely adds up to its timeout to the
+caller-visible `/verify` latency — not a background check. See "Outbound
+network dependency during settlement" in `docs/runbook.md` for the
+operational framing of that tradeoff.
 
-**Crash-safe settlement confirmation.** "Indexer" isn't protocol requirements terminology (it
-doesn't appear in the protocol requirements text) but was a real operational question
-raised in a separate round of external validation: cataloging normally runs
-inline inside the same `onAfterSettle` hook that reports settlement success
-back to the caller — fast, and correct in the overwhelmingly common case,
-but originally not crash-safe. A process crash between the transaction
-confirming and the catalog write completing would leave that resource
-permanently un-confirmed, since the metadata a catalog entry needs (service
-name, description, tags, route template) only ever exists off-chain, in the
-`PaymentPayload` a resource server sent over HTTP — no amount of
-chain-watching alone could reconstruct it after the fact. Closed via a
-transactional-outbox pattern: the settle-time hook durably writes the full
-catalog payload to a `pending_catalog` table
-(`packages/discovery/src/catalog.ts`), keyed by the settlement's
-transaction hash, *before* attempting the `upsert`, and deletes it only
-once the `upsert` actually succeeds. If the process dies in that narrow
-window, the row survives on the next startup pointed at the same data
-directory — standard Postgres commit durability, though this project has
-verified the *application-level* outbox logic directly (the crash-safety
-test below forces `upsert` to throw and confirms the row survives and is
-later resolved), not stress-tested PGlite's own on-disk durability under a
-hard process kill specifically — and
-`packages/facilitator/src/indexer.ts`, a genuinely separate process (`pnpm
-indexer` for a continuous loop, `pnpm indexer:once` for a cron-triggered
-deployment), finds and retries any pending entry independently of the
-original request/response cycle that created it, and also sweeps expired
-provisional entries in the same pass. Verified two ways: a unit test that
-makes `upsert` throw mid-write and confirms the pending row survives and is
-later resolved by a second pass (`packages/facilitator/test/discovery-hooks.test.ts`,
-"crash-safety"), and a real run of the `indexer.ts` binary itself against a
-live database with a manually-enqueued pending entry, confirming it
-actually reconciles end to end, not just in a mock. The settlement itself
-was always correct and final on-chain regardless of any of this — only
-discoverability was ever at risk, never funds.
+**Periodic re-verification.** A resource's operator could change its
+`payTo`/pricing at any point after it's cataloged, and nobody might
+resubmit discovery metadata for it again soon enough to catch that drift
+through the request-triggered path alone. `packages/facilitator/src/indexer.ts`
+— a genuinely separate process (`pnpm indexer` for a continuous loop, `pnpm
+indexer:once` for a cron-triggered deployment) — re-runs the same
+`verifyResourceOwnership` check against already-cataloged resources whose
+verification has gone stale (`BazaarCatalog.listStaleForReverification`,
+24 hours by default), independently of any particular buyer's request:
+still matching refreshes `lastVerifiedAt` and keeps the entry; no longer
+matching removes it outright — a stale, inaccurate listing is worse than no
+listing. This is what "cataloged resources are periodically re-verified so
+that pricing and payment information remain current" means concretely, not
+just as a stated intent.
 
 ## What's reused vs. original
 
@@ -1224,9 +1229,9 @@ seller-side discovery/pricing helpers (`packages/sdk/src/seller.ts` —
   `packages/mcp-discovery-server/src/fence.ts`.
 - **Discovery cataloging and search.** Moved out of this list into their own
   top-level sections, given how much protocol requirements text and external validation is
-  directly about them: see "Automatic cataloging: provisional at receipt,
-  confirmed at settlement" (the cataloging trigger, catalog-integrity
-  protections, and crash-safe settlement confirmation) and "Hybrid search
+  directly about them: see "Automatic cataloging: verification-gated
+  indexing, HTTP and MCP alike" (the cataloging trigger, catalog-integrity
+  protections, and periodic re-verification) and "Hybrid search
   architecture" (lexical + semantic retrieval, RRF fusion, and the search
   quality evaluation harness) above.
 - **No production HA infrastructure.** The discovery catalog runs on real
@@ -1249,13 +1254,21 @@ seller-side discovery/pricing helpers (`packages/sdk/src/seller.ts` —
 
 **Settlement is non-custodial throughout, and that's a structural property of
 the design, not an operating discipline the facilitator promises to
-follow.** Funds move directly from buyer to seller (and, for managed
-`upto`, to the facilitator's fee share) in one atomic on-chain operation —
-the facilitator never holds a balance in transit at any point, for either
-`exact` or `upto`. This is enforced by Soroban itself, not by the
-facilitator's own honesty: every settlement requires the payer's own
-cryptographic authorization (a signed transaction for `exact`, a signed
-Soroban authorization entry for `upto`/`managed upto`), checked by the
+follow — though the mechanics differ by scheme.** `exact` payments move
+directly from buyer to seller, in one atomic on-chain operation. For
+standard and managed `upto`, the authorized ceiling (`max_amount`) is
+transferred into the settlement contract within the same atomic settlement
+transaction; the contract then pays the seller the actual metered amount
+(and the facilitator's fee share, for managed `upto`) and refunds the
+remainder to the buyer — all in that one transaction. The facilitator
+never holds a balance in transit at any point, for any scheme, and no funds
+remain in the settlement contract's custody after settlement completes —
+"non-custodial" describes the *outcome*, not a claim that funds never pass
+through contract logic on the way there. This is enforced by Soroban
+itself, not by the facilitator's own honesty: every settlement requires the
+payer's own cryptographic authorization — a signed Soroban authorization
+entry, for every scheme (see "Auth entries, not pre-signed transactions" in
+"Stellar-specific operational considerations" above) — checked by the
 network at the protocol level. A facilitator that goes offline, has a bug,
 or turns actively malicious can **fail to settle** — it cannot **redirect**
 a payment, **exceed** what the buyer signed, or **forge** a settlement that
@@ -1270,10 +1283,13 @@ contract (each operator deploys and owns their own instance — see
 "No canonical shared settlement contract" just above); no dependency on
 this project's own hosted facilitator to keep functioning (Apache-2.0,
 self-hostable from a clean clone, per "What's reused vs. original"); no
-facilitator-controlled catalog trust (a Bazaar listing's `payTo` is bound
-to a real settled payment's recipient and independently re-verified against
-the resource's own live 402 challenge — see "Automatic cataloging" above —
-not something the facilitator can assert unilaterally).
+facilitator-controlled catalog trust — Bazaar does not rely on
+client-supplied discovery metadata alone. Every resource's actual payment
+requirements are independently verified against its live source (HTTP or
+MCP alike) *before* it is ever indexed, so critical payment information
+such as the payee and pricing cannot be established solely by the party
+submitting the discovery payload — see "Automatic cataloging" above; not
+something the facilitator can assert unilaterally.
 
 **What's honestly *not* decentralized, stated plainly rather than implied
 away**: the Bazaar catalog itself is single-facilitator-scoped by design —
@@ -1289,11 +1305,11 @@ quietly overstated.
 **What the facilitator sees and stores, precisely:**
 
 - Payment payload data needed to `verify`/`settle` a request (the signed
-  transaction or authorization entry, the requirements it's checked
-  against) — all of which becomes public on the Stellar ledger the moment
-  settlement succeeds regardless of what this facilitator does with it.
-  Nothing here is additional tracking layered on top of what a public
-  blockchain already discloses about a settled transaction.
+  Soroban authorization entry, the requirements it's checked against) — all
+  of which becomes public on the Stellar ledger the moment settlement
+  succeeds regardless of what this facilitator does with it. Nothing here
+  is additional tracking layered on top of what a public blockchain already
+  discloses about a settled transaction.
 - Discovery metadata a seller explicitly opts to declare (via the discovery
   extension) — never collected without that opt-in, per "Automatic
   cataloging" above.
@@ -1303,16 +1319,27 @@ quietly overstated.
   `BILLING_ADMIN_TOKEN` (see `docs/developer-guide.md`), not a buyer
   tracking mechanism — it's indexed by which seller got paid, not by who
   paid them.
+- Buyer-level activity, retained only over the rolling window
+  usage-ranking's Sybil-resistance signal needs: `resource_buyers`
+  (`packages/discovery/src/catalog.ts`) records each buyer's most recent
+  activity date per resource, pruned to a 30-day active window — see
+  "Usage-based ranking" above. This is real buyer-level data, stated
+  plainly rather than glossed over as purely aggregate.
 - Operational metrics (`GET /metrics`): settlement counts by scheme/network,
   signer balances, catalog size — aggregate operational signals, not
   per-buyer records.
 
-**What it deliberately does not do**: no buyer identity is collected beyond
-what the buyer's own signature already discloses on a public ledger —
-Stellar addresses are pseudonymous, not anonymous, independent of anything
-this project does, and this facilitator adds no additional
-identity-resolution layer (no accounts, no API keys, no buyer-linked
-analytics). `packages/mcp-discovery-server`'s signer interface keeps signing
+**What it deliberately does not do**: LumenGate does not maintain an
+identity-resolution layer (no accounts, no API keys) or a transaction-level
+buyer activity history. Buyer-level activity is retained only over the
+rolling period required to compute unique-buyer usage statistics (the
+`resource_buyers` bullet above); historical usage itself is stored only as
+aggregated per-resource daily statistics (`resource_usage_daily`), never as
+a per-buyer transaction log. Stellar addresses are pseudonymous, not
+anonymous, independent of anything this project does — but this facilitator
+adds nothing beyond what's already necessary to compute that one
+rate-gated ranking signal. `packages/mcp-discovery-server`'s signer
+interface keeps signing
 keys client-side, in the buyer's own runtime, never transmitted to or held
 by the MCP server (see "Integrating as an agent (MCP)" in
 `docs/developer-guide.md`) — the server facilitates a payment flow, it

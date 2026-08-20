@@ -140,27 +140,34 @@ over the top 50 first-stage search candidates on every `GET
 /discovery/search` request — measured ~800ms on commodity hardware (see
 "Usage-based ranking" in `docs/architecture.md`), a meaningful,
 caller-visible per-query latency cost, not a background job.
-`DISCOVERY_USAGE_RANKING_ENABLED` is also off by default, for a different
-reason — a measured relevance-quality tradeoff, not latency (see the same
-section). Consider whether search latency and/or the usage-ranking
-tradeoff matter for a given deployment before enabling either; both channels can be toggled
-independently at any time with no redeploy.
+`DISCOVERY_USAGE_RANKING_ENABLED` is on by default — it's cheap
+(additive-only RRF fusion against signals already being written, no extra
+outbound calls) — and independently toggleable if a deployment specifically
+wants relevance-only ranking (see the measured tradeoff in the same
+section). `DISCOVERY_L2_RERANK_ENABLED` is the one that's off by default,
+for the latency reason above. Consider whether search latency and/or the
+usage-ranking tradeoff matter for a given deployment before enabling
+`l2rerank` or disabling `usage`; both channels can be toggled independently
+at any time with no redeploy.
 
 ## Running the indexer (catalog reconciler)
 
 A genuinely separate process from the facilitator's HTTP server, with two
-jobs — see "Automatic cataloging: provisional at receipt, confirmed at
-settlement" in `docs/architecture.md` for why both exist:
+jobs — see "Automatic cataloging: verification-gated indexing, HTTP and MCP
+alike" in `docs/architecture.md` for why both exist:
 
-1. Reconciling the settlement-cataloging outbox (`pending_catalog`) after
-   the rare event of a crash between a settlement confirming and its
-   catalog write completing — cataloging normally happens inline and this
-   process has nothing to do here.
-2. Evicting `status: "provisional"` catalog entries (cataloged at
-   `verify()` time, per the protocol requirements literal cataloging trigger) whose
-   `provisionalExpiresAt` has passed without the same request going on to
-   settle — bounding how long a validated-but-never-settled entry stays
-   visible.
+1. **Periodic re-verification.** Cataloging already independently verifies
+   a resource's actual payment information before indexing it, but only at
+   the moment a discovery-enabled payload is received — an operator could
+   change a resource's `payTo`/pricing at any later point, and nobody might
+   resubmit discovery metadata soon enough to catch that drift. This job
+   re-runs the same verification against already-cataloged resources whose
+   verification has gone stale (`DISCOVERY_REVERIFICATION_INTERVAL_MS`, 24h
+   by default): still matching refreshes the entry, no-longer-matching
+   removes it outright.
+2. Stale-buyer retention pruning (`resource_buyers`, see "Usage-based
+   ranking" in `docs/architecture.md`) — unrelated to cataloging, reuses
+   this same reconciliation loop rather than a new scheduling mechanism.
 
 ```bash
 cd packages/facilitator
@@ -172,12 +179,14 @@ pnpm indexer:once    # one reconciliation pass, then exits
 
 Point it at the **same** `DISCOVERY_DB_PATH` as the facilitator process —
 both are separate PGlite processes pointed at the same on-disk PostgreSQL
-data directory. It does not need Soroban RPC access, a Stellar signer, or
-any secret — it only ever replays a payload that was already durably
-written to disk by the facilitator, and it never talks to the chain. It
+data directory. It makes real, live outbound requests of its own (the same
+HTTP/MCP re-verification the facilitator's cataloging hook makes), so it
+does need outbound network access to the resources it's re-verifying,
+though it does not need Soroban RPC access, a Stellar signer, or any
+secret — it never talks to the chain. It
 does load the same local embedding model the facilitator does (see
-"Embedding model" below), since evicting an entry also has to remove it
-from the vector index. Safe to run as a single instance alongside a single
+"Embedding model" below), since refreshing or removing an entry also
+touches the vector index. Safe to run as a single instance alongside a single
 facilitator instance for this prototype's embedded-Postgres setup; once discovery
 storage moves to a standalone Postgres server for a multi-instance
 deployment (see "Scaling path" below), this reconciler moves with it the
@@ -292,9 +301,10 @@ prototype's single-instance deployment:
   local PostgreSQL (PGlite) discovery data directory. It degrades
   independently of settlement: a corrupted or locked data directory fails
   discovery but not `/verify`/`/settle` (they don't share a database), and
-  conversely a settlement can succeed while cataloging fails silently in
-  the background (`onAfterSettle` is best-effort — see "Automatic
-  cataloging: provisional at receipt, confirmed at settlement" in
+  conversely a settlement can succeed even if cataloging was rejected or
+  failed earlier, at verify-time (cataloging is an `onAfterVerify` hook, not
+  tied to settlement outcome at all — see "Automatic cataloging:
+  verification-gated indexing, HTTP and MCP alike" in
   `docs/architecture.md`; this is the accepted single-point-of-failure this
   prototype ships with, not a hidden one).
 - **Single-instance ceiling.** With one process and an embedded PGlite

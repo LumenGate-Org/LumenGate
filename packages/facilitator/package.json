@@ -17,6 +17,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@stellar/stellar-sdk": "^16.0.1",
     "@x402/core": "^2.21.0",
     "@x402/extensions": "^2.21.0",

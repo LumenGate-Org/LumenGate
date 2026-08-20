@@ -16,13 +16,13 @@ export type DecodedWitnessError =
   | "invalid_upto_stellar_missing_payer_signature";
 
 /**
- * Expected ScVal type (by `switch().name`) for each of the 8 witness args, in
- * order — see `buildWitnessScArgs` in `../witness.ts` for the encoding this
- * mirrors. Validated explicitly before `scValToNative` rather than trusting a
- * TypeScript cast: a malicious client controls the raw XDR and could encode
- * any of these positions as an unexpected ScVal variant, silently producing a
- * wrong-typed JS value (e.g. a non-address `from`) that downstream checks
- * were never designed to handle.
+ * Expected ScVal type (by `switch().name`) for each of the 10 witness args,
+ * in order — see `buildWitnessScArgs` in `../witness.ts` for the encoding
+ * this mirrors. Validated explicitly before `scValToNative` rather than
+ * trusting a TypeScript cast: a malicious client controls the raw XDR and
+ * could encode any of these positions as an unexpected ScVal variant,
+ * silently producing a wrong-typed JS value (e.g. a non-address `from`)
+ * that downstream checks were never designed to handle.
  */
 const WITNESS_ARG_TYPES = [
   "scvAddress", // from
@@ -33,6 +33,8 @@ const WITNESS_ARG_TYPES = [
   "scvU64", // requestNonce
   "scvU64", // deadline
   "scvU32", // feeBps
+  "scvI128", // feeFixed
+  "scvU32", // feeMode
 ] as const;
 
 export type DecodedWitness = {
@@ -94,7 +96,7 @@ function decodeCore(
   }
 
   const args = invokeArgs.args();
-  if (args.length !== 8) {
+  if (args.length !== 10) {
     return { ok: false, error: "invalid_upto_stellar_witness_wrong_arity" };
   }
   for (let i = 0; i < WITNESS_ARG_TYPES.length; i++) {
@@ -113,6 +115,8 @@ function decodeCore(
       requestNonce: scValToNative(args[5]) as bigint,
       deadline: scValToNative(args[6]) as bigint,
       feeBps: Number(scValToNative(args[7]) as number | bigint),
+      feeFixed: scValToNative(args[8]) as bigint,
+      feeMode: Number(scValToNative(args[9]) as number | bigint) as UptoWitnessCommitment["feeMode"],
     };
 
     // The address whose *signature* is actually being checked must be the

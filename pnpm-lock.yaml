@@ -150,6 +150,9 @@ importers:
 
   packages/facilitator:
     dependencies:
+      '@modelcontextprotocol/sdk':
+        specifier: ^1.30.0
+        version: 1.30.0(zod@4.4.3)
       '@stellar/stellar-sdk':
         specifier: ^16.0.1
         version: 16.2.0

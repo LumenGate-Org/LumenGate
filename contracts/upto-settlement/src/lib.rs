@@ -31,11 +31,34 @@ use soroban_sdk::{
     vec, Address, Env, IntoVal, Val,
 };
 
-/// Hard ceiling on `fee_bps`, independent of any off-chain facilitator configuration.
-/// 2000 = 20%. Defense-in-depth: protects integrators even if a client SDK naively
-/// signs whatever `fee_bps` a malicious facilitator quotes in `PaymentRequirements`.
+/// Hard ceiling on the *effective* facilitator fee, expressed as a
+/// percentage of `actual_amount`, independent of any off-chain facilitator
+/// configuration and independent of which `fee_mode` computed it. 2000 =
+/// 20%. Defense-in-depth: protects integrators even if a client SDK naively
+/// signs whatever fee a malicious facilitator quotes in `PaymentRequirements`.
 const MAX_FEE_BPS: u32 = 2_000;
 const BPS_DENOMINATOR: i128 = 10_000;
+
+/// Selects how `fee_bps`/`fee_fixed` combine into the effective facilitator
+/// fee, mirroring `BillingFeeConfig`'s off-chain shape
+/// (`packages/facilitator/src/billing.ts`) so the same configurable
+/// fixed/percentage/combined business model applies on-chain, not only to
+/// the off-chain-billed tiers. `fee_fixed` is denominated in the
+/// settlement asset's own atomic units (not USD) specifically so this
+/// contract never needs a price oracle to compute it.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+#[repr(u32)]
+pub enum FeeMode {
+    /// `fee = actual_amount * fee_bps / 10_000`. `fee_fixed` is ignored.
+    Percentage = 0,
+    /// `fee = fee_fixed`, a flat amount in the settlement asset's atomic
+    /// units. `fee_bps` is ignored.
+    Fixed = 1,
+    /// `fee = min(fee_fixed, actual_amount * fee_bps / 10_000)`.
+    CombinedMin = 2,
+    /// `fee = max(fee_fixed, actual_amount * fee_bps / 10_000)`.
+    CombinedMax = 3,
+}
 
 /// Approximate ledgers per day at a 5s close time, used for nonce-record TTL bumps.
 const DAY_IN_LEDGERS: u32 = 17_280;
@@ -86,6 +109,7 @@ pub enum Error {
     FeeExceedsCeiling = 5,
     FacilitatorIsPayer = 6,
     FacilitatorIsPayTo = 7,
+    InvalidFeeMode = 8,
 }
 
 #[contract]
@@ -115,7 +139,17 @@ impl UptoSettlement {
         request_nonce: u64,
         deadline: u64,
         fee_bps: u32,
+        fee_fixed: i128,
+        fee_mode: u32,
     ) -> (i128, i128) {
+        let fee_mode = match fee_mode {
+            0 => FeeMode::Percentage,
+            1 => FeeMode::Fixed,
+            2 => FeeMode::CombinedMin,
+            3 => FeeMode::CombinedMax,
+            _ => panic_with_error!(&env, Error::InvalidFeeMode),
+        };
+
         // --- Facilitator safety: cannot be the payer or the payee it is supposedly
         // routing funds to; mirrors the equivalent checks in the `exact` scheme. ---
         if facilitator == from {
@@ -129,13 +163,36 @@ impl UptoSettlement {
         if env.ledger().timestamp() > deadline {
             panic_with_error!(&env, Error::DeadlineExpired);
         }
-        if actual_amount < 0 || max_amount < 0 {
+        if actual_amount < 0 || max_amount < 0 || fee_fixed < 0 {
             panic_with_error!(&env, Error::NegativeAmount);
         }
         if actual_amount > max_amount {
             panic_with_error!(&env, Error::ActualExceedsMax);
         }
-        if fee_bps > MAX_FEE_BPS {
+
+        // --- Effective fee, computed from fee_mode/fee_bps/fee_fixed
+        // (mirrors BillingFeeConfig's fixed/percentage/combined shape,
+        // packages/facilitator/src/billing.ts), then bounded by MAX_FEE_BPS
+        // as a percentage of actual_amount regardless of which mode
+        // produced it — this is what keeps the on-chain ceiling meaningful
+        // even in Fixed/CombinedMax mode, where an arbitrarily large
+        // fee_fixed would otherwise bypass a bps-only check. When
+        // actual_amount is 0 the ceiling is 0 too, so a nonzero fixed fee
+        // is correctly rejected rather than silently charged against
+        // nothing. ---
+        let percentage_component = (actual_amount * fee_bps as i128) / BPS_DENOMINATOR;
+        let fee = match fee_mode {
+            FeeMode::Percentage => percentage_component,
+            FeeMode::Fixed => fee_fixed,
+            FeeMode::CombinedMin => {
+                if fee_fixed < percentage_component { fee_fixed } else { percentage_component }
+            }
+            FeeMode::CombinedMax => {
+                if fee_fixed > percentage_component { fee_fixed } else { percentage_component }
+            }
+        };
+        let fee_ceiling = (actual_amount * MAX_FEE_BPS as i128) / BPS_DENOMINATOR;
+        if fee > fee_ceiling {
             panic_with_error!(&env, Error::FeeExceedsCeiling);
         }
 
@@ -157,6 +214,8 @@ impl UptoSettlement {
             request_nonce.into_val(&env),
             deadline.into_val(&env),
             fee_bps.into_val(&env),
+            fee_fixed.into_val(&env),
+            (fee_mode as u32).into_val(&env),
         ];
         from.require_auth_for_args(witness_args);
 
@@ -194,9 +253,9 @@ impl UptoSettlement {
             return (0, 0);
         }
 
-        // --- Fee split + transfer via allowance. Spender = this contract, which
-        // self-authorizes `transfer_from` (no external signature required here). ---
-        let fee = (actual_amount * fee_bps as i128) / BPS_DENOMINATOR;
+        // --- Fee split + transfer via allowance. `fee` was already computed
+        // and bounded above. Spender = this contract, which self-authorizes
+        // `transfer_from` (no external signature required here). ---
         let seller_amount = actual_amount - fee;
 
         let token_client = token::TokenClient::new(&env, &token);

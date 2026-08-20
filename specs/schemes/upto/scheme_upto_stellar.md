@@ -74,8 +74,9 @@ way `x402UptoPermit2Proxy` enforces it in Solidity.
 
 Fund movement uses **escrow-and-refund**: `settle` itself pulls the full
 `max_amount` from the buyer into the contract via a plain `token.transfer`,
-splits `actual_amount` between the seller and (if `fee_bps > 0`) the
-facilitator, and refunds the unused remainder (`max_amount - actual_amount`)
+splits `actual_amount` between the seller and (if the effective fee,
+computed per `fee_mode`, is non-zero) the facilitator, and refunds the
+unused remainder (`max_amount - actual_amount`)
 to the buyer — all within the same atomic call, with no `approve` step ever
 required from the buyer. The subtlety this design depends on: that escrow
 pull is bound as a Soroban **sub-invocation** of the same `settle` call the
@@ -102,14 +103,22 @@ facilitator's fee on-chain rather than requiring a separate off-chain billing
 system. See `docs/architecture.md` for the three-tier billing model this
 enables (`exact` and standard `upto` bill off-chain, like the reference
 Coinbase facilitator's per-transaction pricing; managed `upto` is paid
-atomically on-chain).
+atomically on-chain). The on-chain fee uses the same configurable
+fixed/percentage/combined shape the off-chain tiers use (see `fee_mode`
+below), denominated for the fixed component in the settlement asset's own
+atomic units rather than USD — this avoids depending on a Soroban price
+oracle for an arbitrary SEP-41 asset, while still letting an operator run
+the same business model across all three tiers. Regardless of which mode is
+selected, the contract enforces a hard ceiling on the *effective* fee as a
+percentage of `actual_amount`, independent of any off-chain facilitator
+configuration (see "Facilitator Safety" below).
 
 ## Protocol Flow
 
 1. **Client** makes a request to a **Resource Server**.
-2. **Resource Server** responds `402 Payment Required` with `PaymentRequirements` for the `upto` scheme: `amount` is the **maximum** the client will be asked to authorize, and `extra` carries `settlementContract`, `facilitatorAddress`, `feeBps`, and `areFeesSponsored` (see below).
+2. **Resource Server** responds `402 Payment Required` with `PaymentRequirements` for the `upto` scheme: `amount` is the **maximum** the client will be asked to authorize, and `extra` carries `settlementContract`, `facilitatorAddress`, `feeBps`, `feeFixed`, `feeMode`, and `areFeesSponsored` (see below).
 3. **Client** needs no prior on-chain step — no allowance to create, nothing to approve. It only needs a sufficient balance of `asset` to cover `amount`, since `settle` will pull that balance directly into escrow at settlement time (see "Fund Movement: Escrow-and-Refund" below).
-4. **Client** builds an unsigned invocation of `settle(from, pay_to, facilitator, token, max_amount, actual_amount, request_nonce, deadline, fee_bps)` — with `actual_amount` set to `max_amount` as a placeholder purely to obtain a valid simulation — and simulates it to identify the required authorization entry.
+4. **Client** builds an unsigned invocation of `settle(from, pay_to, facilitator, token, max_amount, actual_amount, request_nonce, deadline, fee_bps, fee_fixed, fee_mode)` — with `actual_amount` set to `max_amount` as a placeholder purely to obtain a valid simulation — and simulates it to identify the required authorization entry.
 5. **Client** signs that one authorization entry (the "witness") with their wallet, setting its expiration to `currentLedger + ledgerTimeout` (same `ledgerTimeout` derivation as `exact`).
 6. **Client** encodes the signed authorization entry as base64 XDR and sends a new request to the resource server with a `PaymentPayload` containing it, plus `requestNonce` and `deadline`.
 7. **Resource Server** forwards the `PaymentPayload` and `PaymentRequirements` (with `amount` = the maximum) to the **Facilitator Server's** `/verify` endpoint.
@@ -149,13 +158,29 @@ token.transfer(from, this_contract, max_amount);
 
 // 2. Fee split + refund, out of the contract's own newly-escrowed balance —
 //    self-authorizing, since the contract is its own principal here.
-let fee = actual_amount * fee_bps / 10_000;
+let fee = match fee_mode {
+    FeeMode::Percentage => actual_amount * fee_bps / 10_000,
+    FeeMode::Fixed => fee_fixed,
+    FeeMode::CombinedMin => min(actual_amount * fee_bps / 10_000, fee_fixed),
+    FeeMode::CombinedMax => max(actual_amount * fee_bps / 10_000, fee_fixed),
+};
+// The effective fee, as a percentage of actual_amount, is ceilinged at
+// MAX_FEE_BPS regardless of fee_mode — see "Facilitator Safety" below.
 token.transfer(this_contract, pay_to, actual_amount - fee);
 if fee > 0 { token.transfer(this_contract, facilitator, fee); }
 if max_amount > actual_amount {
     token.transfer(this_contract, from, max_amount - actual_amount);
 }
 ```
+
+`fee_mode` selects which of four fee shapes `fee_bps`/`fee_fixed` are
+interpreted under — `Percentage = 0`, `Fixed = 1`, `CombinedMin = 2`
+(the lesser of the percentage and fixed components), `CombinedMax = 3`
+(the greater of the two) — mirroring the off-chain `BillingFeeConfig`
+shape (`packages/facilitator/src/billing.ts`) that `exact` and standard
+`upto` already use for off-chain billing, so an operator can run the same
+business model across all three tiers. `fee_fixed` is denominated in the
+settlement asset's own atomic units, not USD.
 
 The contract owns **zero persistent storage** — there is no allowance to
 exhaust across concurrent in-flight requests (the shared-allowance race that
@@ -198,6 +223,8 @@ directly in Appendix B's benchmark comparison.
     "settlementContract": "CDOMBVUSWUHDSS65VHKUDZ3IJTBUSMZILYULSYSNKCBE654YACKTN6EE",
     "facilitatorAddress": "GCNGT4YTTVFCE3YFQHP5XAKEF3X3FU3GT7LML7AS7F5MV5JWMWTFXVZA",
     "feeBps": 0,
+    "feeFixed": "0",
+    "feeMode": 0,
     "areFeesSponsored": true
   }
 }
@@ -209,8 +236,10 @@ directly in Appendix B's benchmark comparison.
 |---|---|---|
 | `amount` | Yes | At verification time: the **maximum** amount the client authorizes. At settlement time: the **actual amount to settle**, which MUST be `<=` the previously authorized maximum. Identical semantics to the base `upto` spec's §5. |
 | `extra.settlementContract` | No | **Required** (not merely optional metadata — a client cannot build a witness without it; see "Facilitator Verification Rules" §3 for why the facilitator MUST reject a request that omits it, not just one that gets it wrong). The deployed `x402UptoStellarEscrowSettlement` contract address for this network. |
-| `extra.facilitatorAddress` | No | **Required**, same reasoning. The facilitator signer address that will call `settle` and, when `feeBps > 0`, receive the fee. The client's witness cryptographically binds this address — a different facilitator cannot settle in its place. |
-| `extra.feeBps` | No | Basis points of `actualAmount` the facilitator will take on-chain at settlement. `0` = **standard `upto`**: 100% to `payTo`, facilitator bills off-chain (mirrors `exact`'s billing model, and the reference Coinbase facilitator's free-tier-then-per-transaction pricing). `> 0` = **managed `upto`**: the client's signature commits to this exact value, so it cannot be changed after the fact. MUST be `<=` the contract's `max_fee_bps()` (2000 / 20% in the reference deployment). |
+| `extra.facilitatorAddress` | No | **Required**, same reasoning. The facilitator signer address that will call `settle` and, when the effective fee is non-zero, receive the fee. The client's witness cryptographically binds this address — a different facilitator cannot settle in its place. |
+| `extra.feeBps` | No | Basis points of `actualAmount`, interpreted according to `extra.feeMode`. `feeMode = 0` (`Percentage`) with `feeBps = 0` = **standard `upto`**: 100% to `payTo`, facilitator bills off-chain (mirrors `exact`'s billing model, and the reference Coinbase facilitator's free-tier-then-per-transaction pricing). Any other combination = **managed `upto`**: the client's signature commits to these exact values, so they cannot be changed after the fact. Under `Percentage` mode this value alone determines the fee; under `CombinedMin`/`CombinedMax` it is one of the two components compared against `feeFixed`. Regardless of mode, the resulting *effective* fee, as a percentage of `actualAmount`, MUST be `<=` the contract's `max_fee_bps()` (2000 / 20% in the reference deployment). |
+| `extra.feeFixed` | No | Decimal string, atomic units of the settlement asset (not USD). Interpreted according to `extra.feeMode`: ignored under `Percentage`, the entire fee under `Fixed`, one of the two components compared against `feeBps` under `CombinedMin`/`CombinedMax`. MUST NOT be negative. |
+| `extra.feeMode` | No | Selects how `feeBps`/`feeFixed` combine: `0` = `Percentage` (fee = `actualAmount * feeBps / 10_000`, `feeFixed` ignored), `1` = `Fixed` (fee = `feeFixed`, `feeBps` ignored), `2` = `CombinedMin` (fee = the lesser of the two components), `3` = `CombinedMax` (fee = the greater of the two components). Mirrors the off-chain `BillingFeeConfig` shape (`packages/facilitator/src/billing.ts`) `exact` and standard `upto` already use, so the same business model is configurable across all three settlement tiers. |
 | `extra.areFeesSponsored` | No | Whether the facilitator sponsors the Stellar network fee for the settlement transaction. Currently always `true`, matching `exact`. |
 
 ## `PaymentPayload` `payload` Field
@@ -250,6 +279,8 @@ directly in Appendix B's benchmark comparison.
       "settlementContract": "CDOMBVUSWUHDSS65VHKUDZ3IJTBUSMZILYULSYSNKCBE654YACKTN6EE",
       "facilitatorAddress": "GCNGT4YTTVFCE3YFQHP5XAKEF3X3FU3GT7LML7AS7F5MV5JWMWTFXVZA",
       "feeBps": 0,
+      "feeFixed": "0",
+      "feeMode": 0,
       "areFeesSponsored": true
     }
   },
@@ -268,16 +299,16 @@ The client signs one Soroban authorization entry whose root invocation is:
 ```
 contract:  extra.settlementContract
 function:  "settle"
-args:      (from, pay_to, facilitator, token, max_amount, request_nonce, deadline, fee_bps)
+args:      (from, pay_to, facilitator, token, max_amount, request_nonce, deadline, fee_bps, fee_fixed, fee_mode)
 ```
 
-Note that this is **8 of the 9** arguments `settle` actually takes at call
+Note that this is **10 of the 11** arguments `settle` actually takes at call
 time — `actual_amount` is deliberately excluded. The contract enforces this
 by calling, inside `settle`:
 
 ```rust
 from.require_auth_for_args(
-    (from, pay_to, facilitator, token, max_amount, request_nonce, deadline, fee_bps).into_val(&env)
+    (from, pay_to, facilitator, token, max_amount, request_nonce, deadline, fee_bps, fee_fixed, fee_mode).into_val(&env)
 );
 ```
 
@@ -285,7 +316,8 @@ from.require_auth_for_args(
 args tuple passed to it — **not** the function's full call arguments — so a
 witness signed once, during a simulation using `actual_amount = max_amount`
 as a placeholder, remains valid for a later real settlement using any
-`actual_amount <= max_amount`, at the exact `fee_bps` the client agreed to.
+`actual_amount <= max_amount`, at the exact `fee_bps`/`fee_fixed`/`fee_mode`
+the client agreed to.
 
 ### The witness MUST carry exactly one sub-invocation (the escrow pull)
 
@@ -372,6 +404,8 @@ single source of truth, not duplicated logic that could drift):
 | 5 | `request_nonce` | `u64` |
 | 6 | `deadline` | `u64` |
 | 7 | `fee_bps` | `u32` |
+| 8 | `fee_fixed` | `i128` |
+| 9 | `fee_mode` | `u32` |
 
 ## Facilitator Verification Rules (MUST)
 
@@ -392,7 +426,7 @@ following before returning `isValid: true`:
 - The root invocation MUST authorize exactly one `sorobanAuthorizedFunctionTypeContractFn` call.
 - The invocation's `contractAddress` MUST equal `requirements.extra.settlementContract`.
 - The invocation's `functionName` MUST be `"settle"`.
-- The invocation MUST carry exactly 8 args, matching the table above.
+- The invocation MUST carry exactly 10 args, matching the table above.
 - Each arg MUST be validated against its expected Soroban type (e.g. position 4 MUST be `i128`, not merely "whatever `scValToNative` happens to coerce it to") *before* being converted to a native value — an implementation that skips this and only type-casts at the language level (e.g. TypeScript's `as string`) can silently accept a malformed witness whose fields decode to unexpected values.
 - The invocation MUST carry **exactly one** sub-invocation, structurally validated (not merely counted) against the expected escrow pull: `contractAddress` equal to the witness's own `token`, `functionName` equal to `"transfer"`, and args equal to `(from, settlementContract, max_amount)` — see "The witness MUST carry exactly one sub-invocation" above. Zero sub-invocations, more than one, or a structural mismatch on any of these MUST be rejected; treating "no sub-invocations" as acceptable would silently accept a witness shaped for the allowance-based alternative design instead (Appendix B), which has no escrow pull to authorize.
 - The credentials' signing address MUST equal the witness's own `from` field (position 0) — the Soroban host is expected to reject a mismatch on its own when checking `require_auth_for_args`, but a facilitator SHOULD verify this explicitly rather than relying on that host-level guarantee, since doing so turns a wasted RPC simulate call into an immediate, specific rejection.
@@ -401,18 +435,20 @@ following before returning `isValid: true`:
 
 The witness's extracted args are the **authoritative** source for `from`,
 `pay_to`, `facilitator`, `token`, `max_amount`, `request_nonce`, `deadline`,
-and `fee_bps` — they are the only fields cryptographically bound by the
-client's signature. A facilitator MUST NOT trust a separately-carried JSON
-field (e.g. `payload.accepted.amount`, or `requestNonce`/`deadline` on the
-`PaymentPayload.payload` object) as authoritative for any value that also
-appears inside the signed witness; those JSON copies exist for convenience
-and MUST be cross-checked for equality against the extracted commitment, not
-substituted for it.
+`fee_bps`, `fee_fixed`, and `fee_mode` — they are the only fields
+cryptographically bound by the client's signature. A facilitator MUST NOT
+trust a separately-carried JSON field (e.g. `payload.accepted.amount`, or
+`requestNonce`/`deadline` on the `PaymentPayload.payload` object) as
+authoritative for any value that also appears inside the signed witness;
+those JSON copies exist for convenience and MUST be cross-checked for
+equality against the extracted commitment, not substituted for it.
 
 Required equality checks:
 - `commitment.payTo == requirements.payTo`
 - `commitment.token == requirements.asset`
 - `commitment.feeBps == (requirements.extra.feeBps ?? 0)` — a missing `extra.feeBps` MUST be treated as `0`, not skipped: an implementation that skips the comparison entirely when the field is absent would let a client-signed non-zero `feeBps` through unchecked whenever the resource server simply omits the field, silently reducing the seller's cut.
+- `commitment.feeFixed == (requirements.extra.feeFixed ?? 0)`, treating a missing `extra.feeFixed` as `0` for the same reason. `commitment.feeFixed` MUST NOT be negative.
+- `commitment.feeMode == (requirements.extra.feeMode ?? 0)`, treating a missing `extra.feeMode` as `0` (`Percentage`) for the same reason. `commitment.feeMode` MUST be one of the four defined values (`0`–`3`).
 - `commitment.requestNonce == payload.payload.requestNonce` (as decimal strings)
 - `commitment.deadline == payload.payload.deadline`
 - At **verify** time: `commitment.maxAmount == requirements.amount`
@@ -442,6 +478,8 @@ Required equality checks, in addition to the ones above:
 - `commitment.payTo == accepted.payTo`
 - `commitment.token == accepted.asset`
 - `commitment.feeBps == (accepted.extra.feeBps ?? 0)`
+- `commitment.feeFixed == (accepted.extra.feeFixed ?? 0)`
+- `commitment.feeMode == (accepted.extra.feeMode ?? 0)`
 - `commitment.maxAmount == accepted.amount` — **unconditionally**, in both
   phases (unlike `requirements.amount`, `accepted.amount` is never
   overridden to the settle-phase actual charge).
@@ -469,7 +507,8 @@ place.
 - `commitment.facilitator` MUST be one of the facilitator's own signing addresses.
 - `commitment.facilitator` MUST NOT equal `commitment.from` (the payer).
 - `commitment.facilitator` MUST NOT equal `commitment.payTo` (the seller).
-- `commitment.feeBps` MUST NOT exceed the contract's `max_fee_bps()` (a hard on-chain ceiling independent of any off-chain facilitator configuration).
+- `commitment.feeMode` MUST be one of the four defined values (`0`–`3`); `commitment.feeFixed` MUST NOT be negative.
+- The **effective fee**, computed from `commitment.feeBps`/`commitment.feeFixed` according to `commitment.feeMode` and expressed as a percentage of `actualAmount`, MUST NOT exceed the contract's `max_fee_bps()` (a hard on-chain ceiling independent of any off-chain facilitator configuration, applied uniformly regardless of which `feeMode` was selected).
 
 These checks — mirroring the equivalent facilitator-safety section in
 [`scheme_exact_stellar.md`][scheme-exact-stellar] — prevent a malicious or
@@ -546,10 +585,10 @@ full comparison methodology (`simulateTransaction`-derived, not estimated).
 ## Settlement Logic
 
 1. Facilitator re-verifies the payload independently (Section "Facilitator Verification Rules"), using `requirements.amount` as the actual amount to settle.
-2. The facilitator builds an `invokeHostFunction` operation calling `settle(from, pay_to, facilitator, token, max_amount, actualAmount, request_nonce, deadline, fee_bps)` — **for every `actualAmount`, including `0`** — attaches **two** authorization entries — the client's pre-signed witness (for `from`) and a `sorobanCredentialsSourceAccount`-typed entry (for `facilitator`, satisfied by the transaction's own signature; see "The Witness" above) — and sets itself as the transaction source (sponsoring the network fee, `areFeesSponsored: true`).
+2. The facilitator builds an `invokeHostFunction` operation calling `settle(from, pay_to, facilitator, token, max_amount, actualAmount, request_nonce, deadline, fee_bps, fee_fixed, fee_mode)` — **for every `actualAmount`, including `0`** — attaches **two** authorization entries — the client's pre-signed witness (for `from`) and a `sorobanCredentialsSourceAccount`-typed entry (for `facilitator`, satisfied by the transaction's own signature; see "The Witness" above) — and sets itself as the transaction source (sponsoring the network fee, `areFeesSponsored: true`).
 3. The facilitator simulates once more at submission time to derive the settlement's Soroban resource fee and footprint (same pattern as `exact`'s settle-time simulation), signs the transaction, and submits it via RPC `sendTransaction`.
 4. The facilitator polls for confirmation (`SUCCESS` or `FAILED`).
-5. On success, the contract has atomically: verified the witness, pulled `max_amount` from `from` into escrow (nested as a sub-invocation of the witness, per "Why a dedicated contract" above), computed `fee = actualAmount * fee_bps / 10000`, paid `actualAmount - fee` to `pay_to`, paid `fee` to `facilitator` if non-zero, and refunded `max_amount - actualAmount` back to `from` if non-zero.
+5. On success, the contract has atomically: verified the witness, pulled `max_amount` from `from` into escrow (nested as a sub-invocation of the witness, per "Why a dedicated contract" above), computed `fee` according to `fee_mode` (see "Fund Movement" above), ceilinged the resulting effective fee at `MAX_FEE_BPS` of `actualAmount`, paid `actualAmount - fee` to `pay_to`, paid `fee` to `facilitator` if non-zero, and refunded `max_amount - actualAmount` back to `from` if non-zero.
 
 **A zero-amount settlement MUST still submit a real transaction and MUST NOT
 be short-circuited off-chain.** This is the one place this spec deliberately
@@ -644,7 +683,7 @@ In addition to the standard x402 error codes, the reference implementation
 | `invalid_upto_stellar_payload_malformed` | `authEntry`/`requestNonce`/`deadline` missing or undecodable |
 | `invalid_upto_stellar_witness_wrong_contract` | Witness targets a different contract than `extra.settlementContract` |
 | `invalid_upto_stellar_witness_wrong_function` | Witness authorizes a function other than `settle` |
-| `invalid_upto_stellar_witness_wrong_arity` | Witness args count is not 8 |
+| `invalid_upto_stellar_witness_wrong_arity` | Witness args count is not 10 |
 | `invalid_upto_stellar_witness_missing_escrow_subinvocation` | Witness carries zero, or more than one, sub-invocation (exactly one — the escrow pull — is required; see "The witness MUST carry exactly one sub-invocation") |
 | `invalid_upto_stellar_witness_wrong_escrow_subinvocation` | Witness's sub-invocation doesn't structurally match the expected escrow pull (wrong contract, function, or args) |
 | `invalid_upto_stellar_witness_wrong_arg_type` | A witness arg's Soroban type doesn't match its expected position (see §2) |
@@ -656,10 +695,12 @@ In addition to the standard x402 error codes, the reference implementation
 | `invalid_upto_stellar_payload_wrong_recipient` | Witness `pay_to` disagrees with `requirements.payTo` |
 | `invalid_upto_stellar_payload_wrong_asset` | Witness `token` disagrees with `requirements.asset` |
 | `invalid_upto_stellar_payload_wrong_fee_bps` | Witness `fee_bps` disagrees with `requirements.extra.feeBps` |
+| `invalid_upto_stellar_payload_wrong_fee_fixed` | Witness `fee_fixed` disagrees with `requirements.extra.feeFixed`, or is negative |
+| `invalid_upto_stellar_payload_wrong_fee_mode` | Witness `fee_mode` disagrees with `requirements.extra.feeMode`, or is not one of the four defined values |
 | `invalid_upto_stellar_payload_wrong_settlement_contract` | `requirements.extra.settlementContract` disagrees with the facilitator's own configured contract |
 | `invalid_upto_stellar_payload_extra_facilitator_mismatch` | `requirements.extra.facilitatorAddress` disagrees with the witness's committed `facilitator` |
-| `invalid_upto_stellar_payload_accepted_inconsistent` | `payload.accepted` (`payTo`/`asset`/`extra.feeBps`/`extra.settlementContract`/`extra.facilitatorAddress`/`amount`) disagrees with the witness commitment |
-| `invalid_upto_stellar_fee_exceeds_maximum` | `fee_bps` exceeds the contract's `max_fee_bps()`, or the simulated Stellar network fee exceeds `maxTransactionFeeStroops` |
+| `invalid_upto_stellar_payload_accepted_inconsistent` | `payload.accepted` (`payTo`/`asset`/`extra.feeBps`/`extra.feeFixed`/`extra.feeMode`/`extra.settlementContract`/`extra.facilitatorAddress`/`amount`) disagrees with the witness commitment |
+| `invalid_upto_stellar_fee_exceeds_maximum` | The effective fee (computed from `fee_bps`/`fee_fixed` according to `fee_mode`, as a percentage of `actualAmount`) exceeds the contract's `max_fee_bps()`, or the simulated Stellar network fee exceeds `maxTransactionFeeStroops` |
 | `invalid_upto_stellar_payload_wrong_facilitator` | Witness `facilitator` is not one of this facilitator's signing addresses |
 | `invalid_upto_stellar_payload_facilitator_is_payer` | Witness `facilitator` equals `from` |
 | `invalid_upto_stellar_payload_facilitator_is_payee` | Witness `facilitator` equals `pay_to` |
@@ -677,7 +718,7 @@ In addition to the standard x402 error codes, the reference implementation
 
 The on-chain contract (`contracts/upto-settlement-escrow`) defines its own
 error enum for the checks it performs directly: `DeadlineExpired`,
-`ActualExceedsMax`, `NegativeAmount`, `FeeExceedsCeiling`,
+`ActualExceedsMax`, `NegativeAmount`, `FeeExceedsCeiling`, `InvalidFeeMode`,
 `FacilitatorIsPayer`, `FacilitatorIsPayTo` — notably no `NonceAlreadyUsed`:
 replay rejection is a Soroban host-level failure (the transaction fails
 before the contract ever runs, when a consumed authorization-entry nonce is
@@ -695,12 +736,15 @@ implementation bug or a state change between verify and settle.
    full `maxAmount` regardless of actual usage — this is inherent to the
    `upto` scheme itself, not something this Stellar-specific design can or
    should attempt to fix.
-2. **`fee_bps` is client-signed, not facilitator-chosen at settlement time.**
-   Unlike a design where the facilitator could pick its cut freely up to a
-   ceiling, this scheme includes `fee_bps` inside the signed witness, so the
-   facilitator cannot raise its fee after the client has signed. Only the
-   contract's hard `MAX_FEE_BPS` ceiling (2000 / 20% in the reference
-   deployment) bounds what a facilitator can *quote* in the first place.
+2. **`fee_bps`/`fee_fixed`/`fee_mode` are client-signed, not
+   facilitator-chosen at settlement time.** Unlike a design where the
+   facilitator could pick its cut freely up to a ceiling, this scheme
+   includes all three fee fields inside the signed witness, so the
+   facilitator cannot raise its fee, or switch fee modes, after the client
+   has signed. Only the contract's hard `MAX_FEE_BPS` ceiling (2000 / 20% in
+   the reference deployment), applied to the *effective* fee as a
+   percentage of `actual_amount` regardless of `fee_mode`, bounds what a
+   facilitator can *quote* in the first place.
 3. **Nonce replay.** Enforced entirely by the Soroban host's own
    per-authorization-entry nonce (CAP-0046-11) — this design keeps no
    contract-level storage of its own, so there is no `DataKey` to check or

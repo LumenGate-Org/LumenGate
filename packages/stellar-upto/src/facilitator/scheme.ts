@@ -523,14 +523,22 @@ export class UptoStellarScheme implements SchemeNetworkFacilitator {
     if (commitment.token !== requirements.asset) {
       return { response: invalid("invalid_upto_stellar_payload_wrong_asset", commitment.from) };
     }
-    // Defaults a missing `extra.feeBps` to 0 rather than skipping the check —
-    // otherwise a resource server (or client) that simply omits the field
-    // would let the witness-signed `feeBps` (entirely client-chosen, up to
+    // Defaults a missing `extra.feeBps`/`feeFixed`/`feeMode` to the
+    // Percentage-mode zero-fee shape rather than skipping the check —
+    // otherwise a resource server (or client) that simply omits a field
+    // would let the witness-signed value (entirely client-chosen, up to
     // `MAX_FEE_BPS`) through unchecked, silently reducing the seller's cut.
-    if (commitment.feeBps !== (extra?.feeBps ?? 0)) {
+    if (
+      commitment.feeBps !== (extra?.feeBps ?? 0) ||
+      commitment.feeFixed !== BigInt(extra?.feeFixed ?? "0") ||
+      commitment.feeMode !== (extra?.feeMode ?? 0)
+    ) {
       return { response: invalid("invalid_upto_stellar_payload_wrong_fee_bps", commitment.from) };
     }
     if (commitment.feeBps > MAX_FEE_BPS) {
+      return { response: invalid("invalid_upto_stellar_fee_exceeds_maximum", commitment.from) };
+    }
+    if (commitment.feeFixed < 0n) {
       return { response: invalid("invalid_upto_stellar_fee_exceeds_maximum", commitment.from) };
     }
     // `settlementContract` is never taken from `extra` for the facilitator's
@@ -602,7 +610,11 @@ export class UptoStellarScheme implements SchemeNetworkFacilitator {
       };
     }
     const acceptedExtra = accepted.extra as unknown as Partial<UptoStellarExtra>;
-    if (commitment.feeBps !== (acceptedExtra?.feeBps ?? 0)) {
+    if (
+      commitment.feeBps !== (acceptedExtra?.feeBps ?? 0) ||
+      commitment.feeFixed !== BigInt(acceptedExtra?.feeFixed ?? "0") ||
+      commitment.feeMode !== (acceptedExtra?.feeMode ?? 0)
+    ) {
       return {
         response: invalid("invalid_upto_stellar_payload_accepted_inconsistent", commitment.from),
       };
