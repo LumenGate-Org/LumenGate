@@ -68,7 +68,7 @@ first.
 - [Evidence at a glance](#evidence-at-a-glance)
 - [Components](#components)
 - [The three-tier billing model](#the-three-tier-billing-model)
-  - [Technical assessment: can the off-chain fixed/percentage/combined model extend on-chain?](#technical-assessment-can-the-off-chain-fixedpercentagecombined-model-extend-on-chain)
+  - [Technical assessment: how the off-chain fixed/percentage/combined model extends on-chain](#technical-assessment-how-the-off-chain-fixedpercentagecombined-model-extends-on-chain)
 - [Why `upto` needed a new contract on Stellar](#why-upto-needed-a-new-contract-on-stellar)
 - [How this compares to `upto` on EVM and Solana](#how-this-compares-to-upto-on-evm-and-solana)
 - [Stellar-specific operational considerations](#stellar-specific-operational-considerations)
@@ -80,6 +80,7 @@ first.
 - [Automatic cataloging: verification-gated indexing, HTTP and MCP alike](#automatic-cataloging-verification-gated-indexing-http-and-mcp-alike)
 - [What's reused vs. original](#whats-reused-vs-original)
 - [Scope boundaries (deliberate, not oversold)](#scope-boundaries-deliberate-not-oversold)
+- [Maintenance and Governance](#maintenance-and-governance)
 - [Decentralization](#decentralization)
 - [Privacy and data handling](#privacy-and-data-handling)
 
@@ -1121,38 +1122,79 @@ seller-side discovery/pricing helpers (`packages/sdk/src/seller.ts` —
 
 ## Scope boundaries (deliberate, not oversold)
 
-- **Testnet is this prototype's real target; mainnet is wired and verified
-  reachable, not funded.** `stellar:pubnet` is a genuinely separate,
-  independently-registered configuration
-  (`STELLAR_PUBNET_RPC_URL`/`UPTO_SETTLEMENT_CONTRACT_PUBNET`, see
-  `packages/facilitator/src/server.ts`) rather than a same-instance
+- **Testnet is where this project's real settlement is proven today; mainnet
+  deployment is the actual target, not a stretch goal left open-ended — the
+  protocol requirements state this as a literal, committed deliverable, not
+  an optional stretch:** "Implement x402 verify and settle for Stellar...
+  on both `stellar:testnet` and `stellar:pubnet`" (Section 3.1), and "Both
+  networks are committed deliverables, not one or the other." `stellar:pubnet`
+  is already a genuinely separate, independently-registered
+  configuration (`STELLAR_PUBNET_RPC_URL`/`UPTO_SETTLEMENT_CONTRACT_PUBNET`,
+  see `packages/facilitator/src/server.ts`) rather than a same-instance
   same-config assumption — `/supported` only advertises pubnet once an RPC
-  URL is actually set, rather than advertising a network that would fail
-  at first real use. Verified live and read-only (`pnpm pubnet:rpc-connectivity`
-  in `e2e/conformance`, plus starting the facilitator itself against
-  `https://mainnet.sorobanrpc.com`): real mainnet RPC connectivity, correct
-  network passphrase, and (via `GET /metrics`) a real Horizon balance
-  lookup against a live mainnet account. Not exercised: an actual
-  settlement transaction on pubnet, which needs a funded mainnet account
-  and asset-custody decisions beyond this prototype's scope — see
-  `e2e/conformance/CONFORMANCE_REPORT.md`, "requirements gap analysis
-  and closure," for the full reasoning and evidence.
-- **No formal, third-party security assessment.** `contracts/upto-settlement-escrow`
-  and the facilitator/SDK/MCP layers around it have unit test coverage, live
-  testnet conformance runs, and nine rounds of adversarial validation — one
-  internal (found and fixed a missing `facilitator.require_auth()`) and
-  eight external, each against the fixes from the prior pass. This isn't
-  a token pass: real, distinct issues were found and fixed in most rounds
-  (an on-chain settlement-finality gap, an idempotency cache that could be
-  replayed past validation, a spending-cap guardrail with a TOCTOU bypass,
-  catalog-poisoning vectors through under-checked fields, among others), a
-  couple of claimed findings were investigated and did *not* hold up, and
-  low-risk residuals that weren't fixed (public `/settle` trusting
-  caller-supplied settlement amount; the MCP SSRF guard's DNS check being
-  TOCTOU/fail-open) are named explicitly rather than left implicit. See
+  URL is actually set, rather than advertising a network that would fail at
+  first real use. Verified live and read-only today
+  (`pnpm pubnet:rpc-connectivity` in `e2e/conformance`, plus starting the
+  facilitator itself against `https://mainnet.sorobanrpc.com`): real mainnet
+  RPC connectivity, correct network passphrase, and (via `GET /metrics`) a
+  real Horizon balance lookup against a live mainnet account. **What
+  testnet has proven is the technical design choices — not a finished
+  codebase, on either network.** The escrow-and-refund settlement pattern,
+  the auth-entry witness scheme, the atomic on-chain fee split, the
+  cataloging and re-verification flow — these are validated *designs*,
+  backed by real testnet transactions and adversarial review rather than
+  argument alone, which is a meaningfully different and narrower claim than
+  "this is finished testnet code, ready to carry over to mainnet as-is."
+  The testnet implementation itself is the same, single codebase the
+  audit-tooling pass and third-party review below will run against — it is
+  expected to keep changing on its own testnet track as that process
+  surfaces findings, not treated as a frozen artifact that mainnet
+  deployment will simply inherit unmodified. The path to mainnet runs
+  through that audit-tooling pass and third-party review, whatever code
+  changes those surface (on testnet first, same as every change so far),
+  funding a mainnet account, and the asset-custody decisions that come with
+  real money — see `e2e/conformance/CONFORMANCE_REPORT.md`, "requirements
+  gap analysis and closure," for the full reasoning and evidence gathered
+  so far. Treat the current implementation, testnet included, as
+  validated-by-design and pre-audit — not final.
+- **No formal, third-party security assessment yet — and the deliberate plan
+  is automated audit tooling first, external audit second, not the other way
+  around.** The protocol requirements make a third-party security review a
+  precondition for the mainnet production tag itself, not an optional
+  extra: "A third party security review before the mainnet production tag,
+  covering the settlement path, auth entry validation, the discovery trust
+  boundary, and any registry contract" (Section 3.6), reinforced under
+  evaluation criteria as "a track record of shipping audited infrastructure
+  and clear threat modeling, given this handles real payments," with a
+  "security review report with resolved findings" named as an expected
+  deliverable. `contracts/upto-settlement-escrow` and the facilitator/SDK/MCP
+  layers around it have unit test coverage, live testnet conformance runs,
+  and nine rounds of manual adversarial validation — one internal (found and
+  fixed a missing `facilitator.require_auth()`) and eight external, each
+  against the fixes from the prior pass. This isn't a token pass: real,
+  distinct issues were found and fixed in most rounds (an on-chain
+  settlement-finality gap, an idempotency cache that could be replayed past
+  validation, a spending-cap guardrail with a TOCTOU bypass, catalog-poisoning
+  vectors through under-checked fields, among others), a couple of claimed
+  findings were investigated and did *not* hold up, and low-risk residuals
+  that weren't fixed (public `/settle` trusting caller-supplied settlement
+  amount; the MCP SSRF guard's DNS check being TOCTOU/fail-open) are named
+  explicitly rather than left implicit. See
   `e2e/conformance/CONFORMANCE_REPORT.md` — every round has its own section
-  with the full before/after. Treat this as a rigorously self-validated
-  proof of concept, not production-hardened infrastructure.
+  with the full before/after. **Before commissioning a third-party audit,
+  the plan is to run the contracts through automated static-analysis/audit
+  tooling** — a Soroban-specific static analyzer (e.g. Scout) plus
+  dependency-vulnerability scanning (`cargo audit`) and `cargo clippy`,
+  neither of which is wired into CI yet (`.github/workflows/ci.yml`
+  currently only runs `cargo test` and license checks for the Rust side) —
+  and fix whatever it surfaces first, so a paid third-party audit is spent
+  finding what tooling and manual review together couldn't, not
+  re-discovering issues a linter would have caught for free. Not yet run as
+  of this writing — a committed next step, not a claim it's already been
+  done. Treat the current state as
+  a rigorously self-validated proof of concept, not production-hardened
+  infrastructure, until that tooling pass and a third-party assessment are
+  both complete.
 - **`/verify` and `/settle` are intentionally unauthenticated.** Any resource
   server can call them with no prior registration — required by x402's own
   "no accounts, no API keys" design, the same posture Coinbase's reference
@@ -1249,6 +1291,45 @@ seller-side discovery/pricing helpers (`packages/sdk/src/seller.ts` —
   after years of assessed, wide adoption), each facilitator deploys and owns
   its own `x402UptoStellarSettlement` instance. Canonicalization is left as a
   future ecosystem question.
+
+## Maintenance and Governance
+
+**Review authority is split deliberately, not open by default everywhere —
+because this project moves real funds.** `.github/CODEOWNERS` requires
+core-maintainer review on the paths where an unreviewed merge could
+misdirect funds or corrupt what gets cataloged: `contracts/` (the Soroban
+settlement contracts themselves), `packages/stellar-upto/` (witness signing
+and facilitator verify/settle logic), `packages/facilitator/src/billing.ts`
+(fee computation and charging), `packages/facilitator/src/resource-ownership.ts`
+(the catalog-integrity gate — see "Automatic cataloging" above), and
+`specs/` (the upstream-contributable protocol definition itself — a bug
+there doesn't just affect this repo). Everything else — discovery ranking,
+MCP tooling, SDK helpers, examples, and documentation — is open to ordinary
+community pull requests, reviewed against the exact same CI bar (tests,
+typecheck, lint, both license-compliance checks) as a core-team change, with
+no separate approval tier.
+
+**A reviewer proposed running maintenance on a community-governed basis;
+adopted in part, not wholesale.** Diffusing review authority evenly across
+all code trades away exactly the accountability that fund-moving code
+needs — a single unreviewed merge to `contracts/` or `billing.ts` is a
+different order of risk than one to `examples/` or a doc. So the split
+above is the actual compromise: community involvement is real and
+encouraged everywhere it doesn't touch settlement, fees, or catalog
+integrity, and gated by a named reviewer everywhere it does.
+
+**The target structure is a small, *named, multi-person* maintainer team —
+specifically to avoid a bus-factor single point of failure — not a single
+unaccountable gatekeeper.** `.github/CODEOWNERS` currently names a
+placeholder org handle (`@LumenGate-Org`) rather than individual
+maintainers; this describes the intended structure to grow into as the team
+does, not a claim that a multi-person team is already staffed and enforcing
+it today. See "Maintainers and Review" in `CONTRIBUTING.md` for the
+contributor-facing version of this policy, and "Maintenance and support
+plan" in `docs/runbook.md` for the fuller operational picture — the
+upstream contribution path (spec to the x402 Foundation, developer guide to
+Stellar's own docs), automated spec-drift tracking via Dependabot gated on
+the full CI suite, and the handoff plan if maintenance capacity changes.
 
 ## Decentralization
 

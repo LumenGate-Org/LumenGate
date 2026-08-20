@@ -362,6 +362,23 @@ This project needs a clear maintenance commitment and handoff path:
   documentation — not the contract's on-chain authority, which no key
   controls by design; see "no upgrade mechanism" above) rather than letting
   the project go stale silently.
+- **Maintenance governance: hybrid, not fully open.** A reviewer proposed
+  running maintenance on a community-governed basis. Considered and adopted
+  in part, not wholesale: this project moves real funds, so `.github/CODEOWNERS`
+  requires core-maintainer review on the paths where an unreviewed merge could
+  misdirect funds or corrupt what gets cataloged — `contracts/`,
+  `packages/stellar-upto/`, `packages/facilitator/src/billing.ts`,
+  `packages/facilitator/src/resource-ownership.ts`, `specs/`. Everything
+  else — discovery, MCP tooling, SDK helpers, examples, docs — is open to
+  ordinary community pull requests reviewed against the same CI bar as
+  core-team changes, no separate approval tier. The target is a small,
+  *named, multi-person* core-maintainer team specifically to avoid a
+  single-point-of-failure bus factor, not a single unaccountable gatekeeper
+  — `.github/CODEOWNERS` currently names a placeholder org handle rather
+  than individual maintainers, described as the intended structure to grow
+  into as the team does, not a claim it's staffed that way today. See
+  "Maintainers and Review" in [`CONTRIBUTING.md`](../CONTRIBUTING.md) for
+  the contributor-facing version of this same policy.
 
 ## Incident basics
 
