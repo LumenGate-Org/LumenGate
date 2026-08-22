@@ -15,14 +15,14 @@
     "eval:usage-ranking": "tsx eval/evaluate-usage-ranking.ts"
   },
   "dependencies": {
-    "@electric-sql/pglite": "^0.5.4",
-    "@electric-sql/pglite-pgvector": "^0.0.5",
+    "@electric-sql/pglite": "^0.5.5",
+    "@electric-sql/pglite-pgvector": "^0.0.6",
     "@huggingface/transformers": "^4.2.0",
     "express": "^4.21.2"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",
-    "tsx": "^4.23.10",
+    "tsx": "^4.23.12",
     "typescript": "^5.7.3",
     "vitest": "^3.0.5"
   }
