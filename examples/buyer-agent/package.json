@@ -11,14 +11,14 @@
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^16.0.1",
-    "@x402/core": "^2.21.0",
-    "@x402/fetch": "^2.21.0",
-    "@x402/stellar": "^2.21.0",
+    "@x402/core": "^2.23.0",
+    "@x402/fetch": "^2.23.0",
+    "@x402/stellar": "^2.23.0",
     "@x402-stellar/sdk": "workspace:*",
     "dotenv": "^16.4.7"
   },
   "devDependencies": {
     "typescript": "^5.7.3",
-    "tsx": "^4.21.0"
+    "tsx": "^4.23.12"
   }
 }
