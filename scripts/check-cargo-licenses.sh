@@ -2,11 +2,11 @@
 # Enforces the same RFP-literal license requirement as scripts/check-licenses.mjs,
 # for the Rust side: each Soroban contract is its own crate with its own
 # dependency tree, so each is checked independently — mirrors how
-# .github/dependabot.yml already treats them as three separate ecosystems.
+# .github/dependabot.yml already treats them as four separate ecosystems.
 set -euo pipefail
 
 COPYLEFT_PATTERN='(^|[^L])(A?GPL|SSPL|BUSL)|Commons Clause|Elastic License'
-CONTRACTS=("contracts/upto-settlement-escrow" "contracts/upto-settlement" "contracts/custom-account-demo")
+CONTRACTS=("contracts/upto-settlement-escrow" "contracts/upto-settlement" "contracts/custom-account-demo" "contracts/spending-policy-account")
 FAILED=0
 
 for dir in "${CONTRACTS[@]}"; do

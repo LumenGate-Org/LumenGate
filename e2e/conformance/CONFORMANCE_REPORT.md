@@ -1859,6 +1859,114 @@ aggregated per-resource daily rollups beyond that window.
 across the affected packages, all green after every code change in this
 round, not just the ones directly under test.
 
+## Round twelve: spending-policy account — a real on-chain budget ceiling
+
+An external review compared this project's own submission text against its
+code and found a genuine inconsistency: the submission described a custom
+`__check_auth` smart account enforcing a real spending policy as already
+tested on testnet, while `docs/architecture.md` correctly disclosed that
+the only account tested (`contracts/custom-account-demo`) has no policy
+logic at all — an owner-key check, nothing more. Verified directly against
+`contracts/custom-account-demo/src/lib.rs`: `__check_auth`'s
+`_auth_contexts` parameter is prefixed with an underscore, meaning it's
+never read. The reviewer's resolution path was explicit and taken as
+given, not re-litigated: build a real spending policy, test it live, then
+update the evidence — not walk the submission's claim back down to match
+the code.
+
+**Design decision, disclosed rather than silently substituted.** The
+submission described this as a "rolling budget ceiling." Checked directly
+against the protocol requirements text (Section 3.4): the requirement
+itself only asks respondents to "describe how it composes with Stellar
+smart account spending policies to keep an agent inside a budget" — no
+specific mechanism, no prior-testing claim, and no "rolling" language
+anywhere in it. Both "rolling" and "already tested" were this project's own
+submission going further than required. A literal sliding window (spend in
+the trailing N seconds from right now) needs a timestamped history of every
+spend summed on each check — unbounded storage growth for a
+security-relevant reference contract, not an acceptable tradeoff here.
+Built instead: a fixed-period counter (`period_id = timestamp /
+period_seconds`, reset on rollover) — the same bounded pattern this
+project's off-chain `SellerBillingPlan` quotas already use, and the one
+proposed for managed `upto`'s own future on-chain quotas
+(`docs/architecture.md`, "The three-tier billing model"). One consistent
+renewable-allowance shape across the project, not a third mechanism
+invented just for this contract.
+
+**The contract.** `contracts/spending-policy-account`
+(`x402SpendingPolicyAccount`) — `init` pins an owner Ed25519 key, a single
+governed SEP-41 `token`, a `ceiling` (atomic units), and `period_seconds`,
+all immutable after `init`. `__check_auth` verifies the owner's signature,
+then scans `auth_contexts` for `Context::Contract` entries whose `contract`
+matches the configured token and whose `fn_name` is `"transfer"`, sums
+their `amount` argument, and rejects (`BudgetExceeded`) if that sum plus
+what's already been spent this period would exceed the ceiling. An
+authorization tree with no recognizable transfer against the configured
+token is rejected outright (`NoRecognizedTransfer`) — fail-closed, not
+silently allowed because the signature checked out. 14 unit tests, using
+real (non-`mock_all_auths`) authorization semantics throughout — a real
+Ed25519 keypair (`ed25519-dalek`, dev-dependency) signs each test's
+`__check_auth` call, the same way `custom-account-demo`'s tests do for
+their one signature-failure case, extended here to also exercise the
+budget-success path those tests never needed. Covers: within-budget
+success, over-budget rejection, exact-at-ceiling vs. one-unit-over,
+multiple transfers in one authorization accumulating toward the same
+ceiling, spend accumulating correctly across separate calls in the same
+period, budget reset on period rollover (simulated via
+`env.ledger().with_mut`), an unrecognized function rejected, a transfer
+against a different token rejected, invalid signature rejected regardless
+of budget (`#[should_panic]`, mirroring `custom-account-demo`'s own
+precedent), double-init rejected, and zero/negative `ceiling` or
+`period_seconds` rejected at `init`.
+
+**Deployment (Stellar testnet):**
+- Contract: `CCGVD3Y3X72NATFDVVTOEMHX3S5EZPN3RTKGSSIUSEV427DBJQ2E75Q7`
+- Wasm hash: `1d896d9ff9d5004f1d18db9fdffe6fe2692dbce8b827e733322a07d283209764`
+  (6,168 bytes)
+- Init: `ceiling = 1,000,000`, `period_seconds = 86,400` (1 day), governing a
+  freshly self-issued test asset (`SPAT`, SAC-wrapped, same
+  self-contained-token pattern as `TUSD` elsewhere in this report —
+  `CDGSH7P3OSR6WLJZL5C4C4GPGR2AV7YV6YQ642JWLNHDZ4SD4OKF4WRI`), rather than
+  depending on a pre-existing project secret for an asset with an already
+  known balance.
+- Init tx:
+  [`a8a058df46e5931431c4653545483019d13a5e90b4a1d28789fdee5d88ebd773`](https://stellar.expert/explorer/testnet/tx/a8a058df46e5931431c4653545483019d13a5e90b4a1d28789fdee5d88ebd773)
+
+**The live proof.** `e2e/conformance/src/spending-policy-testnet.ts`
+(`pnpm spending-policy:testnet`) mirrors `custom-account-testnet.ts`'s
+structure and rigor exactly — the same client-side custom-signature
+handling, the same unmodified `ExactStellarScheme` facilitator — but runs
+two settlements in sequence to prove both halves of a spending policy, not
+just that a custom account can pay at all:
+
+1. **Within budget (600,000 of a 1,000,000 ceiling) — succeeded.**
+   `verify()` returned `isValid: true`; `settle()` returned `success: true`.
+   Settlement tx:
+   [`9a35163713720cf7438b550326b18cde9f93f5a8e102b82d998704f74bf8b626`](https://stellar.expert/explorer/testnet/tx/9a35163713720cf7438b550326b18cde9f93f5a8e102b82d998704f74bf8b626).
+   `remaining_budget()` dropped from 1,000,000 to 400,000, confirmed by a
+   real read-only contract call, not inferred.
+2. **Would exceed the remaining budget (another 600,000, against 400,000
+   left) — rejected on-chain.** Real Soroban host error:
+   `HostError: Error(Auth, InvalidAction)`, with the diagnostic event log
+   showing `__check_auth`'s own rejection explicitly:
+   `Error(Contract, #6)` — `BudgetExceeded`. This surfaced at
+   `ExactStellarScheme.verify()` itself (`invalid_exact_stellar_payload_simulation_failed`),
+   before any funds moved — Soroban's simulation exercises `__check_auth`
+   as part of determining required authorizations, so a policy violation
+   is caught at the same point a malformed payload would be, not only at
+   real submission. `remaining_budget()` read **400,000 both before and
+   after** the rejected attempt — a failed authorization consumes none of
+   the allowance, proven directly rather than assumed from the contract's
+   atomic-rollback design (see the "Storage-write safety" note in
+   `contracts/spending-policy-account/src/lib.rs`'s module docs).
+
+**Full regression suite after this round:** Rust 63/63
+(`upto-settlement-escrow` 20, `upto-settlement` 25, `custom-account-demo`
+4, `spending-policy-account` 14); TypeScript suite unaffected (no package
+changed) — 260/260. `.github/workflows/ci.yml`'s `contracts` and `scout`
+jobs extended to cover the new contract; `scripts/check-cargo-licenses.sh`,
+`scripts/check-cargo-audit.sh`, and `.github/dependabot.yml` likewise.
+
 ## Out of scope for this report
 
 Live pubnet **settlement** (fund movement) is not exercised — see the

@@ -75,6 +75,8 @@ jobs:
         working-directory: contracts/upto-settlement
       - run: cargo test
         working-directory: contracts/custom-account-demo
+      - run: cargo test
+        working-directory: contracts/spending-policy-account
       # Lint as a real gate, not decorative: -D warnings fails the build on
       # any clippy lint, same as any other required check here.
       - run: cargo clippy --all-targets -- -D warnings
@@ -83,6 +85,8 @@ jobs:
         working-directory: contracts/upto-settlement
       - run: cargo clippy --all-targets -- -D warnings
         working-directory: contracts/custom-account-demo
+      - run: cargo clippy --all-targets -- -D warnings
+        working-directory: contracts/spending-policy-account
       - run: cargo install cargo-license
       - run: ./scripts/check-cargo-licenses.sh
       # Dependency-vulnerability scan (RustSec advisory DB). See
@@ -104,6 +108,7 @@ jobs:
           - upto-settlement-escrow
           - upto-settlement
           - custom-account-demo
+          - spending-policy-account
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # CoinFabrik's Soroban-specific static analyzer, part of the same

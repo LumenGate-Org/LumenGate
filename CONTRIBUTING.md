@@ -17,7 +17,7 @@ lint — CI runs both as required checks (`.github/workflows/ci.yml`'s
 on a clippy warning:
 
 ```bash
-cd contracts/upto-settlement-escrow # or upto-settlement, or custom-account-demo
+cd contracts/upto-settlement-escrow # or upto-settlement, custom-account-demo, or spending-policy-account
 cargo test
 cargo clippy --all-targets -- -D warnings
 ```

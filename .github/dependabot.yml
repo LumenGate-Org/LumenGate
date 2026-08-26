@@ -38,6 +38,14 @@ updates:
       cargo-minor-and-patch:
         update-types: ["minor", "patch"]
 
+  - package-ecosystem: "cargo"
+    directory: "/contracts/spending-policy-account"
+    schedule:
+      interval: "weekly"
+    groups:
+      cargo-minor-and-patch:
+        update-types: ["minor", "patch"]
+
   # Keeps the SHA-pinned actions in ci.yml current — Dependabot updates
   # both the pin and the version comment together when it opens a PR.
   - package-ecosystem: "github-actions"

@@ -113,6 +113,22 @@ pnpm custom-account:testnet   # a custom __check_auth account settles a real exa
 ```
 
 ```bash
+# Requires a deployed contracts/spending-policy-account instance, `init`-ed
+# with an owner key, a governed ASSET_TOKEN, a ceiling, and period_seconds —
+# and the account itself (its own contract address, not the owner's) must
+# hold a balance of ASSET_TOKEN:
+export SPENDING_POLICY_CONTRACT=<deployed x402SpendingPolicyAccount address>
+export OWNER_SECRET=<the secret whose public key was init'd as the account's owner>
+export ASSET_TOKEN=<SEP-41 token address, matching the one this account was init'd with>
+export FACILITATOR_SECRET=$(stellar keys show facilitator)
+export SELLER_ADDRESS=$(stellar keys address seller)
+pnpm spending-policy:testnet  # a real on-chain per-period spending ceiling: one
+                               # settlement within budget succeeds, a second that
+                               # would exceed the remaining budget is rejected
+                               # on-chain — not just an owner-key check
+```
+
+```bash
 # No env vars, no funded account, no prerequisites above — pure read-only
 # RPC calls (getHealth/getNetwork/getLatestLedger) against real Stellar
 # mainnet, proving the facilitator's pubnet wiring reaches genuine mainnet

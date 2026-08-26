@@ -45,10 +45,11 @@ inspect, and access x402 services through tool calls.
 ## Current Traction
 
 LumenGate is implemented as a working Stellar testnet prototype. The repository
-contains 309 automated tests: 260 TypeScript tests across 5 packages and 49
-Rust contract tests across 3 Soroban contracts. Core flows, including the
-atomic on-chain facilitator fee split, are validated through verifiable
-testnet transactions recorded in the conformance report.
+contains 323 automated tests: 260 TypeScript tests across 5 packages and 63
+Rust contract tests across 4 Soroban contracts. Core flows, including the
+atomic on-chain facilitator fee split and a real on-chain spending-policy
+budget ceiling, are validated through verifiable testnet transactions
+recorded in the conformance report.
 
 The configurable business model is implemented across fixed, percentage-based,
 and min/max combined off-chain pricing. Two `upto` architectures were built,
@@ -102,6 +103,8 @@ submission. Horizon is used for balance checks and operational metrics.
 contracts/
   upto-settlement-escrow/   Default Soroban escrow-and-refund settlement contract
   upto-settlement/          Allowance-based Soroban settlement variant
+  custom-account-demo/      Minimal owner-key __check_auth account (composability proof)
+  spending-policy-account/  Reference __check_auth account with a real on-chain budget ceiling
 docs/
   architecture.md           System design and security model
   developer-guide.md        Seller, buyer, and operator integration guide
@@ -147,6 +150,12 @@ cd contracts/upto-settlement-escrow
 cargo test
 
 cd ../upto-settlement
+cargo test
+
+cd ../custom-account-demo
+cargo test
+
+cd ../spending-policy-account
 cargo test
 ```
 

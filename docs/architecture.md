@@ -92,11 +92,11 @@ first.
 | Design B (`upto`, escrow-and-refund, this project's default) is cheaper on-chain than Design A (allowance-based) | **-25.3%** write bytes, **-31.5%** minimum resource fee — real `simulateTransaction` calls against both deployed contracts, re-run and reproduced while writing this document | "Benchmark methodology and full results" below · `pnpm resource-benchmark:testnet` |
 | Design B's escrow-pull cannot be invoked as a standalone bearer credential (the exact attack its own design critique raised) | Live testnet attack attempt, real signed witness, rejected on-chain: `Error(Auth, InvalidAction)` | "The `upto` settlement design" below · `CONFORMANCE_REPORT.md`, "Design B live proof" |
 | Managed `upto`'s facilitator fee splits **atomically, on-chain**, in the same transaction that settles the buyer's payment | Live testnet settlement with a nonzero `fee_bps`, verified balance deltas across buyer/seller/facilitator | "The three-tier billing model" below · `CONFORMANCE_REPORT.md` |
-| Custom Soroban `__check_auth` accounts (the literal "smart account spending policies" requirement) compose with this facilitator **unmodified** | Live testnet `exact` settlement paid from a deployed custom-account contract, through the unmodified upstream `ExactStellarScheme` | "Composition with Stellar smart account spending policies" below · `pnpm custom-account:testnet` |
+| Custom Soroban `__check_auth` accounts compose with this facilitator **unmodified**, and a real spending-policy account enforces a per-period budget ceiling live | Live testnet `exact` settlements: a minimal owner-key custom account settling normally, and a separate spending-policy account rejecting an over-budget settlement on-chain with `Error(Auth, InvalidAction)` | "Composition with Stellar smart account spending policies" below · `pnpm custom-account:testnet` · `pnpm spending-policy:testnet` |
 | Channel accounts decouple settlement submission from the facilitator's own signing identity, for concurrent-load scaling | Live testnet run: channel account's sequence number advanced; facilitator signer's own sequence number stayed untouched — confirmed against Horizon | "Sequence-number bottlenecks under load" below |
 | Bazaar never indexes a resource on submitted metadata alone, for HTTP or MCP | Cataloging hook independently re-verifies live payment information (HTTP 402 / MCP tool listing) before every `upsert`, gated in the hook itself, plus a periodic re-verification pass for already-cataloged resources | "Automatic cataloging" below |
 | Usage-based search ranking never promotes a candidate the relevance stages didn't already select, and its real-world tradeoff is measured, not assumed | Dedicated containment test, plus a harness-level eval with synthetic usage data — which caught and led to fixing a real implementation regression before it shipped | "Usage-based ranking" below · `pnpm eval:usage-ranking` |
-| Full automated test suite | **309 tests passing** — 260 TypeScript across 5 packages (`discovery`, `facilitator`, `mcp-discovery-server`, `sdk`, `stellar-upto`), 49 Rust across 3 Soroban contracts — plus 10 live testnet conformance scripts exercising real settlement transactions. Pubnet (mainnet) scripts are connectivity/configuration checks only — see "Scope boundaries" below for what's live on which network | Per-package `pnpm test` · `e2e/conformance/CONFORMANCE_REPORT.md` |
+| Full automated test suite | **323 tests passing** — 260 TypeScript across 5 packages (`discovery`, `facilitator`, `mcp-discovery-server`, `sdk`, `stellar-upto`), 63 Rust across 4 Soroban contracts — plus 11 live testnet conformance scripts exercising real settlement transactions. Pubnet (mainnet) scripts are connectivity/configuration checks only — see "Scope boundaries" below for what's live on which network | Per-package `pnpm test` · `e2e/conformance/CONFORMANCE_REPORT.md` |
 
 Every row links to the section (or the conformance report) with the full
 methodology behind it — this table is an index, not a substitute for
@@ -463,29 +463,69 @@ validator shouldn't have to go looking for them.
   fixed number of storage reads/writes per call — not a design that grows
   with catalog size, seller count, or request volume, since discovery
   (`packages/discovery`) is entirely off-chain.
-- **Composition with Stellar smart account spending policies.** The RFP
-  states this as a literal requirement — "Support classic keypairs and
-  custom `__check_auth` accounts" — and it's now backed by a real
-  transaction, not just the architectural argument this bullet used to make
-  on its own: `require_auth`/`require_auth_for_args` are the same primitive
-  a custom-account contract's `__check_auth` intercepts, so `exact` and
-  `upto` shouldn't care what kind of address the payer is — and a minimal
-  Ed25519 `__check_auth` account
-  (`contracts/custom-account-demo`, deployed testnet address
-  `CBWJDTO27GF53DGH4YFJJ4MFZEFLFJH3C36JUCEN2PRVSUZMOL5H3LPO`) settling a
-  real `exact` payment through the unmodified `ExactStellarScheme`
-  facilitator confirms it — see
-  `e2e/conformance/src/custom-account-testnet.ts`
-  (`pnpm custom-account:testnet`) and the transaction hash in
-  `CONFORMANCE_REPORT.md`. What this proves is narrow and deliberate: that
-  the facilitator's existing `verify`/`settle` code needs zero changes to
-  accept a contract address as payer. What it does *not* prove: this
-  project doesn't ship or test a real spending-policy contract itself (e.g.
-  a reference "max N per day" policy) — the demo account has no policy
-  logic at all, just an owner-key check. A genuine spending-policy account
-  would compose the same way (same `require_auth` interception point), but
-  that's a distinct, larger piece of work this proof deliberately didn't
-  attempt.
+- **Composition with Stellar smart account spending policies.** The
+  protocol requirements state this as a literal requirement — "Support
+  classic keypairs and custom `__check_auth` accounts," and separately,
+  "describe how it composes with Stellar smart account spending policies to
+  keep an agent inside a budget" — and both are now backed by real
+  transactions, not just the architectural argument this bullet used to
+  make on its own: `require_auth`/`require_auth_for_args` are the same
+  primitive a custom-account contract's `__check_auth` intercepts, so
+  `exact` and `upto` shouldn't care what kind of address the payer is. Two
+  contracts prove this at increasing depth, kept deliberately separate
+  rather than blurred into one:
+  1. A minimal Ed25519 `__check_auth` account
+     (`contracts/custom-account-demo`, deployed testnet address
+     `CBWJDTO27GF53DGH4YFJJ4MFZEFLFJH3C36JUCEN2PRVSUZMOL5H3LPO`) settling a
+     real `exact` payment through the unmodified `ExactStellarScheme`
+     facilitator — see `e2e/conformance/src/custom-account-testnet.ts`
+     (`pnpm custom-account:testnet`). What this proves, precisely: the
+     facilitator's existing `verify`/`settle` code needs zero changes to
+     accept a contract address as payer. It has no spending-policy logic —
+     an earlier version of this project's own submission described this
+     account's testing as if it already demonstrated a real spending
+     policy; it doesn't, and didn't. That gap is what the second contract
+     below closes for real, rather than walking the claim back.
+  2. A reference spending-policy account
+     (`contracts/spending-policy-account`, deployed testnet address
+     `CCGVD3Y3X72NATFDVVTOEMHX3S5EZPN3RTKGSSIUSEV427DBJQ2E75Q7`) whose
+     `__check_auth` inspects the authorized invocation for a `transfer`
+     against a configured SEP-41 asset and enforces a real per-period
+     spending ceiling, rejecting an authorization that would exceed it —
+     not a `mock_all_auths()` unit-test claim but a live testnet proof: one
+     settlement within budget succeeded
+     (`9a35163713720cf7438b550326b18cde9f93f5a8e102b82d998704f74bf8b626`),
+     and a second that would have exceeded the remaining budget was
+     rejected on-chain with `Error(Auth, InvalidAction)` /
+     `Error(Contract, #6)` (`BudgetExceeded`) — surfaced at `verify()`
+     itself, before any funds moved — with the on-chain remaining-budget
+     counter provably unchanged by the rejected attempt. See
+     `e2e/conformance/src/spending-policy-testnet.ts`
+     (`pnpm spending-policy:testnet`) and "Spending-policy account: a real
+     on-chain budget ceiling" in `CONFORMANCE_REPORT.md` for the full
+     transaction trail.
+
+  **One deliberate design substitution, disclosed rather than silently
+  made:** the submission described this as a "rolling budget ceiling." A
+  literal sliding window (spend in the trailing N seconds from right now)
+  needs a timestamped history of every spend summed on each check —
+  unbounded storage growth for a security-relevant reference contract. This
+  contract instead uses a fixed-period counter (`period_id =
+  timestamp / period_seconds`, reset on rollover) — the same bounded,
+  well-understood pattern this project's off-chain `SellerBillingPlan`
+  quotas already use, and the one proposed for managed `upto`'s own future
+  on-chain quotas above, rather than a third, different mechanism invented
+  just for this contract.
+
+  **A narrower guarantee for `upto`/`managed upto` than for `exact`, stated
+  precisely:** this account governs what a buyer *authorizes* per request —
+  for `upto`'s escrow-and-refund design, that's the signed `max_amount`
+  ceiling, not the eventual metered `actual_amount` a facilitator settles
+  for. The budget is consumed against what the buyer signed, at signing
+  time, the same moment the facilitator's own `MAX_FEE_BPS` and the buyer's
+  own balance already bound things independently. This is inherent to what
+  a `__check_auth` hook can see, not a gap this contract introduces, but
+  worth stating rather than implying it bounds actual metered `upto` spend.
 - **Wallet coordination on auth-entry signing.** Both schemes need a client
   wallet that can sign a raw Soroban authorization entry
   (`signAuthEntry`/`SignAuthEntry` in `@x402/stellar`'s `ClientStellarSigner`

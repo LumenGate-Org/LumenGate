@@ -8,7 +8,7 @@
 # scanner catches for free, before a paid third-party review.
 set -euo pipefail
 
-CONTRACTS=("contracts/upto-settlement-escrow" "contracts/upto-settlement" "contracts/custom-account-demo")
+CONTRACTS=("contracts/upto-settlement-escrow" "contracts/upto-settlement" "contracts/custom-account-demo" "contracts/spending-policy-account")
 FAILED=0
 
 for dir in "${CONTRACTS[@]}"; do
