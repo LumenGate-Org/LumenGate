@@ -21,7 +21,7 @@ soroban-sdk = { version = "27.0.5", features = ["testutils"] }
 # opposite: a deliberately invalid signature) — already present transitively
 # via soroban-sdk's own testutils, pinned here directly since this crate
 # calls it by name.
-ed25519-dalek = "2.2.0"
+ed25519-dalek = "3.0.0"
 
 [profile.release]
 opt-level = "z"
