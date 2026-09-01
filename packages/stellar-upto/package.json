@@ -24,7 +24,7 @@
     "@x402/stellar": "^2.21.0"
   },
   "devDependencies": {
-    "typescript": "^5.7.3",
+    "typescript": "^6.0.3",
     "vitest": "^3.0.5"
   }
 }
