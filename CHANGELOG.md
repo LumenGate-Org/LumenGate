@@ -7,6 +7,31 @@ behind each entry.
 
 ## Unreleased
 
+### 2026-09-01 — Increase unit test coverage across the TypeScript packages
+
+- Measured actual per-file coverage (`@vitest/coverage-v8`, newly added)
+  across all five TypeScript packages rather than guessing where gaps were.
+- `packages/sdk`: 26.57% → 100% statement coverage. Added tests for
+  `client.ts` (the exact module whose broken import previously took down
+  CI), `allowance.ts`, and `cancel.ts`, mocking `@stellar/stellar-sdk`'s
+  `contract.AssembledTransaction.build` rather than hitting live RPC.
+- `packages/stellar-upto`: added full coverage for `server/scheme.ts`
+  (0% → 100%), the route-config side of the managed-`upto` fee-mode work —
+  previously untested despite the facilitator-side fee logic being well
+  covered.
+- `packages/discovery`: added coverage for `router.ts` (the Express route
+  handlers, invoked directly against a mocked catalog) and
+  `extension-responses.ts`, both previously at 0%.
+- Left process-entrypoint files (`facilitator/src/server.ts`,
+  `facilitator/src/indexer.ts`, `mcp-discovery-server/src/index.ts`)
+  unit-test-free by design, consistent with this project's existing
+  convention of validating those live via `e2e/conformance` and manual
+  runs rather than mocking their way around real network/process
+  boundaries — confirmed this is an existing, deliberate pattern (not a
+  gap) before leaving them alone.
+- Net: 313 TypeScript tests, up from 260 (53 new), all packages still
+  passing typecheck, lint, and build with zero regressions.
+
 ### 2026-08-15 — Fix stale search-quality figures and a lint gap
 
 - Corrected `docs/architecture.md`, which cited the hybrid search benchmark's

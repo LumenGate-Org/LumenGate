@@ -45,7 +45,7 @@ inspect, and access x402 services through tool calls.
 ## Current Traction
 
 LumenGate is implemented as a working Stellar testnet prototype. The repository
-contains 323 automated tests: 260 TypeScript tests across 5 packages and 63
+contains 376 automated tests: 313 TypeScript tests across 5 packages and 63
 Rust contract tests across 4 Soroban contracts. Core flows, including the
 atomic on-chain facilitator fee split and a real on-chain spending-policy
 budget ceiling, are validated through verifiable testnet transactions
