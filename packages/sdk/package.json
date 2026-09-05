@@ -13,7 +13,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@stellar/stellar-sdk": "^16.0.1",
+    "@stellar/stellar-sdk": "^17.0.1",
     "@x402/core": "^2.21.0",
     "@x402/extensions": "^2.21.0",
     "@x402/fetch": "^2.21.0",
